@@ -1,45 +1,41 @@
 library(Matrix)
 library(mvtnorm)
 library(rstan)
-options(mc.cores = parallel::detectCores())
-rstan_options(auto_write = TRUE)
+# options(mc.cores = parallel::detectCores())
 
 set.seed(1)
 
 # Simulate data according to Lopes and Carvalho (2007) without switching
-n_N <- 500
+n_T <- 100
 n_F <- 5
 n_Y <- 10
-n_D <- 2000
-n_W <- 1000
-AD <- 0.99
-TD <- 15
+n_D <- 1000
 
 # Create data strucutures
-Y <- array(0, c(n_N, n_Y))
-B <- array(0, c(n_Y, n_F))
-log_F_sigma <- array(0, c(n_F))
+Y <- array(0, c(n_T, n_Y))
+B <- array(0, c(n_T, n_Y, n_F))
+log_F_sigma <- array(0, c(n_T, n_F))
 
 # y hyperparameters 
 # y_sigma
-log_y_sigma <- rep(rnorm(1), n_Y)
+y_sigma <- matrix(rep(1. / rgamma(1, 3, 1), n_Y), c(n_Y, 1))
 
 # x hyperparameters
 # Covariance
-log_f_sigma <- rnorm(n_F, mean=-1, sd=0.25)
-# chol_f_sigma <- diag(abs(rnorm(n_F, mean=0, sd=0.1)))
-chol_f_sigma <- matrix(rnorm(n_F * n_F, sd=0.1), c(n_F, n_F))
+log_f_sigma <- rnorm(n_F, mean=-0.75, sd=0.5)
+chol_f_sigma <- matrix(rnorm(n_F * n_F, sd=0.25), c(n_F, n_F))
 diag(chol_f_sigma) <- abs(diag(chol_f_sigma))
+chol_f_sigma[upper.tri(chol_f_sigma)] <- 0
+chol_f_sigma[lower.tri(chol_f_sigma)] <- 0
 
 # B hyperparameters
 # Want B to be 'almost sparse' where B contains mostly values close to 0.05
-base_order <- 0.05
-# base_order <- 1
-bias_order <- 0.5
+discount <- 0.95
+base <- 0.05
 p_connect <- 0.3
 n_connect <- p_connect * n_Y * n_F
-add <- (2 * rbinom(n_connect, 1, 0.5) - 1) * (bias_order + abs(rnorm(n_connect)))
-B_ <- base_order * rnorm(n_Y * n_F)
+add <- (2 * rbinom(n_connect, 1, 0.5) - 1) * (0.5 + abs(rnorm(n_connect)))
+B_ <- base * rnorm(n_Y * n_F)
 B_[1:n_connect] <- B_[1:n_connect] + add
 B_ <- matrix(sample(B_), c(n_Y, n_F))
 # To ensure identifiability, set upper triangle to be 0 and diagonal to be 1
@@ -47,26 +43,19 @@ B_ [upper.tri(B_)] <- 0
 diag(B_) <- 1
 
 # Initialise
-log_F_sigma <- as.vector(log_f_sigma + chol_f_sigma %*% rnorm(n_F))
-B <- B_ + base_order * lower.tri(matrix(rnorm(n_Y * n_F), c(n_Y, n_F)))
-plot(c(t(B_)) ~ c(t(B)), cex=2, pch=10, col="dark gray", xlab="Simulated Loadings", ylab="Estimated Loadings")
+log_F_sigma[1, ] <- log_f_sigma + chol_f_sigma %*% rnorm(n_F)
+B[1, , ] <- B_ + discount * base * lower.tri(matrix(rnorm(n_Y * n_F), c(n_Y, n_F)))
+Y[1,  ] <- B[1, , ] %*% t(rmvnorm(1, sigma=diag(exp(log_F_sigma[1, ])))) + y_sigma * rnorm(n_Y)
 
 # Generate data
-for (i in 1:n_N){
-  Y[i, ] <- B %*% t(rmvnorm(1, sigma=diag(exp(log_F_sigma)))) + exp(log_y_sigma) * rnorm(n_Y)
+for (i in 2:n_T){
+  log_F_sigma[i, ] <- log_F_sigma[i-1, ] + chol_f_sigma %*% rnorm(n_F)
+  B[i, , ] <- B[i-1, , ] + discount * base * lower.tri(B[i, , ]) * matrix(rnorm(n_Y * n_F), c(n_Y, n_F))
+  Y[i, ] <- B[i, , ] %*% t(rmvnorm(1, sigma=diag(exp(log_F_sigma[i, ])))) + y_sigma * rnorm(n_Y)
 }
 
-fit <- stan(file='infer.stan', data=list(P=n_Y, N=n_N, D=n_F, y=Y), iter=n_D, warmup=n_W, refresh=2000, seed=1, control=list(adapt_delta=AD, max_treedepth=TD))
-
-params <- extract(fit)
-beta_hat <- c(t(colMeans(params$beta, dims=1)))
-# png("beta_comp.png")
-plot(beta_hat ~ c(t(B)), cex=2, pch=10, col="dark gray", xlab="Simulated Loadings", ylab="Estimated Loadings")
-fit_B <- lm(beta_hat ~ c(t(B))) # Fit a linear model
-abline(fit_B)
-abline(0,1, lty = 2) # 1:1 line
-# dev.off()
-fac <- params$fac
+fit <- stan(file='infer.stan', data=list(P=n_Y, D=n_F, TS=n_T, y=Y), iter=5000, warmup=1000, refresh=2000, seed=1, control=list(adapt_delta=0.95))
+# fit <- stan(file='infer.stan', data=list(P=n_Y, D=n_F, TS=n_T, y=Y), seed=1, control=list(adapt_delta=0.8))
 
 # # David's code
 # MultiGeneralDLM = function(Y, X, m0, C0, n0, S0, deltaB, deltaE) 

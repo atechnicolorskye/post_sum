@@ -1,40 +1,87 @@
 import numpy as np
-import torch
+import matplotlib.pyplot as plt
+import pystan
 
+np.set_printoptions(precision=5, suppress=True)
+
+import gzip
+import os
 import pdb
+import pickle
 
-class InferRanndomWalk(object):
-    # random walk, obtain posterior for beta from 1 to T
-    def __init__(self):
-        pass
+seed = 1
 
-    def infer(self, X):
-        '''
-        Taken from pg 109 of Mike West's Bayesian Forecasting and Dynamic Models. Cross-referenced with MLAPP.
-        '''
-        # get self.dim, T and x_0
-        self.T, self.dim  = X.shape[0] - 1, X.shape[1]
-        self.x0 = X[0, :].reshape(-1, 1)
-        self.diag_x0 = np.diag(X[0, :])
+np.random.seed(seed)
+threads = 4
+os.environ['STAN_NUM_THREADS'] = str(threads)
 
-        # assign identity once and for all
-        self.identity = np.identity(self.dim)
+n_N = 100
+n_F = 5
+n_Y = 10
+n_D = 5000
+n_W = 1000
+n_C = 4
+AD = 0.95
 
-        # init posteriors
-        self.betas_mu = np.zeros((self.T, self.dim))
-        self.betas_cov = np.zeros((self.T, self.dim, self.dim))
+Y = np.zeros((n_N, n_Y))
+B = np.zeros((n_Y, n_F))
+log_F_sigma = np.zeros((n_F))
 
-        # set initial cov to identity
-        self.betas_cov[0] = self.identity
+# y hyperparameters
+log_y_sigma = np.random.normal(0, 1) * np.ones(n_Y)
 
-        # infer
-        for i in range(1, self.T):
-            R_t = self.betas_cov[i-1]
-            Q_t = self.diag_x0 * R_t * self.diag_x0 + self.identity
-            f_t = np.matmul(self.diag_x0, self.betas_mu[i-1])
-            e_t = X[i] - f_t
-            A_t = R_t * self.diag_x0 / Q_t
-            self.betas_mu[i] = self.betas_mu[i-1] + np.matmul(A_t, e_t)
-            self.betas_cov[i] = R_t - A_t * A_t.T * Q_t
+# f hyperparameters
+# log_f_sigma = np.random.normal(0, 0.25, n_F)
+# diag chol
+# chol_log_f_sigma = np.diag(np.abs(np.random.normal(0, 0.1, n_F)))
+# full chol
+chol_log_f_sigma = np.random.normal(0, 1, n_F * n_F).reshape(n_F, n_F)
+row, col = np.diag_indices(n_F)
+chol_log_f_sigma[row, col] = np.abs(chol_log_f_sigma[row, col])
 
-        return  self.betas_mu, self.betas_cov
+# B
+base_order = 1
+# base_order = 0.05
+# bias_order = 0.5
+# p_connect = 0.3
+# n_connect = np.int(0.3 * n_Y * n_F)
+# add = (2 * np.random.binomial(1, 0.5, n_connect) - 1) * (bias_order + np.abs(np.random.standard_normal(n_connect)))
+B_ = base_order * np.random.standard_normal(n_Y * n_F)
+# B_[:n_connect] += add
+B_ = np.random.permutation(B_).reshape(n_Y, n_F)
+row, col = np.triu_indices(n_Y, 0, n_F)
+B_[row, col] = 0
+np.fill_diagonal(B_, 1)
+
+# Initialise
+# log_F_sigma[0] = np.random.multivariate_normal(log_f_sigma_, chol_log_f_sigma ** 2)
+log_F_sigma = np.zeros(n_F) # chol_log_f_sigma @ np.random.standard_normal(n_F) 
+B = B_ # + base_order * np.tril(np.random.standard_normal(n_Y * n_F).reshape(n_Y, n_F), k=-1)
+
+for i in range(1, n_N):
+    Y[i] = B @ np.random.multivariate_normal(np.zeros(n_F), np.diag(np.exp(2 * log_F_sigma))) + np.exp(log_y_sigma) * np.random.standard_normal(n_Y)
+
+dat = {
+    'P': n_Y,
+    'N': n_N,
+    'D': n_F,
+    # 'fac_mu': np.zeros(n_F),
+    'y': Y
+    }
+
+extra_compile_args = ['-pthread', '-DSTAN_THREADS']
+model = pystan.StanModel(file='infer.stan', extra_compile_args=extra_compile_args)
+fit = model.sampling(data=dat, iter=n_D, warmup=n_W, seed=seed, chains=n_C, control={'adapt_delta':AD}, n_jobs=threads)
+with gzip.open('pystan_non_tv_fit_{}_{}_{}_{}_{}.gz'.format(n_D, n_W, seed, n_C, AD), 'wb') as f:
+    pickle.dump({'model' : model, 'fit' : fit}, f)
+res = fit.extract(pars=['beta', 'fac'])
+plt.scatter(B, np.mean(res['beta'], axis=0))
+plt.show()
+pdb.set_trace()
+print(B - np.mean(res['beta'], axis=0))
+print('log_y_sigma', log_y_sigma)
+print('log_F_sigma', log_F_sigma)
+print(fit.stansummary(pars=['log_y_sd', 'L_lower'])) 
+Y_hat = np.einsum('ijk,ilk->ilj', res['beta'], res['fac'])
+print(np.mean(Y - Y_hat, axis=(0, 1)))
+
