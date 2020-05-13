@@ -1,135 +1,120 @@
-library(Matrix)
-library(mvtnorm)
+library(posterior)
+library(tidyverse)
+
+# library(reticulate)
+# use_python("/usr/bin/python")
+# np <- import("numpy")
+
+library(cmdstanr)
 library(rstan)
 # options(mc.cores = parallel::detectCores())
 
-set.seed(1)
+seed <- 1
+set.seed(seed)
 
 # Simulate data according to Lopes and Carvalho (2007) without switching
 n_T <- 100
-n_F <- 5
-n_Y <- 10
+n_F <- 2
+n_X <- 5
 n_D <- 1000
+n_W <- 1000
+R <- 0.5
+AD <- 0.99
+TD <- 10
+# SS <- 0.1
+discount <- 1
 
 # Create data strucutures
-Y <- array(0, c(n_T, n_Y))
-B <- array(0, c(n_T, n_Y, n_F))
-log_F_sigma <- array(0, c(n_T, n_F))
+X <- array(0, c(n_T, n_X))
+B <- array(0, c(n_T, n_X, n_F))
 
-# y hyperparameters 
-# y_sigma
-y_sigma <- matrix(rep(1. / rgamma(1, 3, 1), n_Y), c(n_Y, 1))
+# x hyperparameters 
+x_sigma <- abs(rep(rnorm(1, sd=0.25), n_X))
+# x_sigma <- abs(rnorm(n_X, sd=0.25))
+# x_sigma <- rep(1, n_X)
 
-# x hyperparameters
-# Covariance
-log_f_sigma <- rnorm(n_F, mean=-0.75, sd=0.5)
-chol_f_sigma <- matrix(rnorm(n_F * n_F, sd=0.25), c(n_F, n_F))
-diag(chol_f_sigma) <- abs(diag(chol_f_sigma))
-chol_f_sigma[upper.tri(chol_f_sigma)] <- 0
-chol_f_sigma[lower.tri(chol_f_sigma)] <- 0
+
+# f hyperparameters
+# F_sigma <- abs(rnorm(n_F, sd=0.5))
 
 # B hyperparameters
 # Want B to be 'almost sparse' where B contains mostly values close to 0.05
-discount <- 0.95
-base <- 0.05
+base_order <- 0.1
+bias_order <- 0.5
 p_connect <- 0.3
-n_connect <- p_connect * n_Y * n_F
-add <- (2 * rbinom(n_connect, 1, 0.5) - 1) * (0.5 + abs(rnorm(n_connect)))
-B_ <- base * rnorm(n_Y * n_F)
-B_[1:n_connect] <- B_[1:n_connect] + add
-B_ <- matrix(sample(B_), c(n_Y, n_F))
-# To ensure identifiability, set upper triangle to be 0 and diagonal to be 1
-B_ [upper.tri(B_)] <- 0
-diag(B_) <- 1
+B_loc <- matrix(0, n_X, n_F)
+diag(B_loc) <- 1
+n_l_t <- sum(lower.tri(B_loc))
+B_loc[lower.tri(B_loc)] <- rnorm(n_l_t, 0, .05) +
+                           rbinom(n_l_t, 1, .3) * (2 * rbinom(n_l_t, 1, .5) - 1) * 
+                           rnorm(n_l_t, bias_order, 1)
+                           # (bias_order + abs(rnorm(n_l_t)))
+B_scale <- matrix(0, n_X, n_F)
+B_scale[lower.tri(B_scale)] <- abs(rnorm(n_l_t, mean=0, sd=0.5)) # rbeta(n_l_t, 2, 2) # rep(0.5, n_l_t)
 
 # Initialise
-log_F_sigma[1, ] <- log_f_sigma + chol_f_sigma %*% rnorm(n_F)
-B[1, , ] <- B_ + discount * base * lower.tri(matrix(rnorm(n_Y * n_F), c(n_Y, n_F)))
-Y[1,  ] <- B[1, , ] %*% t(rmvnorm(1, sigma=diag(exp(log_F_sigma[1, ])))) + y_sigma * rnorm(n_Y)
+B[1, , ] <- B_loc + base_order * lower.tri(B[1, , ]) * matrix(rnorm(n_X * n_F), c(n_X, n_F))
+# X[1, ] <- (B[1, , ] %*% (F_sigma * rnorm(n_F))) + x_sigma * rnorm(n_X)
+X[1, ] <- (B[1, , ] %*% rnorm(n_F)) + x_sigma * rnorm(n_X)
 
 # Generate data
 for (i in 2:n_T){
-  log_F_sigma[i, ] <- log_F_sigma[i-1, ] + chol_f_sigma %*% rnorm(n_F)
-  B[i, , ] <- B[i-1, , ] + discount * base * lower.tri(B[i, , ]) * matrix(rnorm(n_Y * n_F), c(n_Y, n_F))
-  Y[i, ] <- B[i, , ] %*% t(rmvnorm(1, sigma=diag(exp(log_F_sigma[i, ])))) + y_sigma * rnorm(n_Y)
+  B[i, , ] <- B_loc + (B_scale * (B[i-1, , ] - B_loc)) + discount * base_order * lower.tri(B[i, , ]) * matrix(rnorm(n_X * n_F), c(n_X, n_F))
+  X[i,  ] <- (B[i, , ] %*% rnorm(n_F)) + x_sigma * rnorm(n_X)
 }
 
-fit <- stan(file='infer.stan', data=list(P=n_Y, D=n_F, TS=n_T, y=Y), iter=5000, warmup=1000, refresh=2000, seed=1, control=list(adapt_delta=0.95))
-# fit <- stan(file='infer.stan', data=list(P=n_Y, D=n_F, TS=n_T, y=Y), seed=1, control=list(adapt_delta=0.8))
+# # Standardise X
+# X_mu <- colMeans(X, dims = 1)
+# X_sd <- apply(X, 2, sd)
+# X_s <- scale(X)
 
-# # David's code
-# MultiGeneralDLM = function(Y, X, m0, C0, n0, S0, deltaB, deltaE) 
-# {
-#   if (dim(Y)[1] == dim(X)[1]) {
-#     numT = dim(Y)[1]
-#   } else {
-#     stop("check X and Y dimensions")
-#   }
-#   numY <- dim(Y)[2]
-#   numX <- dim(X)[2]
-#   if (dim(C0)[1] != numX | dim(C0)[2] != numX) {
-#     stop("Check X,C0 dimension compatibility")
-#   }
-#   if (dim(as.matrix(S0))[1] != numY | dim(S0)[2] != numY) {
-#     stop("Check Y,S0 dimension compatibility")
-#   }
-#   # Data Structures
-#   S <- array(0, c(numT, numY, numY))
-#   m <- array(0, c(numT, numX, numY))
-#   R <- array(0, c(numT, numX, numX))
-#   W <- array(0, c(numT, numX, numX))
-#   C <- array(0, c(numT, numX, numX))
-#   f <- array(0, c(numT, numY))
-#   e <- array(0, c(numT, numY))
-#   Q <- numeric(numT)
-#   n <- numeric(numT)
-#   V <- numeric(numT) + 1  # Vt 
-#   At <- numeric(numX)
-#   
-#   # Priors at time 0 (t=1)
-#   m[1,,] <- m0
-#   C[1,,] <- C0
-#   S[1,,] <- S0
-#   n[1] <- n0
-#   
-#   # Recursion
-#   for (t in 2:(numT)) {
-#     # Prior at t W[t,,] = C[t-1,,]*(delta^-1 - 1) #Need we keep track of W? R[t,,] = C[t-1,,] + W[t,,] note a[t,,] = G%*%m[t-1,,], but G is identity matrix
-#     R[t,,] = C[t - 1,,]/deltaB
-#     W[t,,] = C[t-1,,]*(deltaB^-1 - 1)
-#     # Forecast for t using t-1 data
-#     f[t, ] = t(X[t - 1,]) %*% m[t - 1,,]
-#     Q[t] = V[t] + t(X[t - 1,]) %*% R[t,,] %*% X[t - 1,]
-#     # Posterior at t
-#     At = R[t,,] %*% X[t - 1,]/Q[t]
-#     e[t,] = as.numeric(Y[t - 1,] - f[t,])
-#     m[t,,] = m[t - 1,,] + At %*% t(e[t,])
-#     C[t,,] = R[t,,] - At %*% t(At) * Q[t]
-#     n[t] = deltaE * n[t - 1] + 1
-#     S[t,,] = n[t]^-1 * (deltaE * n[t - 1] * S[t - 1,,] + e[t, ] %*% t(e[t,])/Q[t])
-#     
-#   }
-#   return(list(m = m, C = C, n=n, S = S, R = R, W=W, muHat = f, Q = Q, error = e))
-# }
+matplot(X, type='l')
+matplot(matrix(B, c(n_T, n_X * n_F)), type='l')
 
-# # Set hyperparameters for Normal-Inverse Wishart
-# m0 <- 0
-# c0 <- diag(numX)
-# S0 <- diag(numY)
-# n0 <- 1
-# deltaB <- 0.99
-# deltaE <- 0.99
+model <- cmdstan_model('infer_tv.stan', quiet=FALSE, force_recompile=TRUE)
+fit <- model$sample(data=list(P=n_X, F=n_F, TS=n_T, disc=discount, x=X), 
+                    num_samples=n_D, 
+                    num_warmup=n_W, 
+                    refresh=100, 
+                    init=R, 
+                    seed=seed, 
+                    adapt_delta=AD, 
+                    max_depth=TD, 
+                    # stepsize=SS,
+                    num_chains=1,
+                    num_cores=4)
+
+stanfit <- read_stan_csv(fit$output_files())
+
+# print(x_sigma)
+# print(chol_F_sigma) 
+# print(log_F_sigma_loc) 
+# print(log_F_sigma_scale)
+
+params <- extract(stanfit)
+# beta_lower_sd_hat <- colMeans(params$raw_beta_lower_sd, dims=1)
+beta_lower_loc_hat <- colMeans(params$beta_lower_loc, dims=1)
+beta_lower_scale_hat <- colMeans(params$beta_lower_scale, dims=1)
+# F_sigma_hat <- colMeans(params$f_sd, dims=1)
+# pdf("comp.pdf")
+plot(c(beta_lower_loc_hat) ~ c(B_loc[lower.tri(B_loc)]), cex=2, pch=10, col="dark gray", xlab="Simulated Beta Loc", ylab="Estimated Beta Loc")
+fit_scale <- lm(c(beta_lower_loc_hat) ~ c(B_loc[lower.tri(B_loc)])) # Fit a linear model
+abline(fit_scale)
+abline(0,1, lty = 2) # 1:1 line
+plot(c(beta_lower_scale_hat) ~ c(B_scale[lower.tri(B_scale)]), cex=2, pch=10, col="dark gray", xlab="Simulated Beta Scale", ylab="Estimated Beta Scale")
+fit_scale <- lm(c(beta_lower_scale_hat) ~ c(B_scale[lower.tri(B_scale)])) # Fit a linear model
+abline(fit_scale)
+abline(0,1, lty = 2) # 1:1 line
+# plot(c(F_sigma_hat) ~ c(F_sigma), cex=2, pch=10, col="dark gray", xlab="Simulated F SD", ylab="Estimated F_SD")
+# fit_scale <- lm(c(F_sigma_hat) ~ c(F_sigma)) # Fit a linear model
+# abline(fit_scale)
+# abline(0,1, lty = 2) # 1:1 line
+# dev.off()
+
+print(fit$draws() %>%
+        subset_draws(variable = c('lp__', 'x_sd', 'raw_beta_lower_sd', 'beta_lower_scale'), regex = TRUE) %>%
+        summarise_draws())
+# saveRDS(fit, "draws.rds")
 # 
-# res <- MultiGeneralDLM(y, X, m0, c0, n0, S0, deltaB, deltaE)
-# 
-# # Create data strucutures for posterior draws 
-# D <- array(0, c(numT, numD, numX))
-# 
-# # Draw from posterior
-# for (i in 1:numT){
-#   D[i, , ] <- mvrnorm(numD, res$m[i, , ], res$C[i, , ])
-# }
-# 
-# filename <- paste('sim_x_', numX, '_y_', numY,  '_T_', numT, '_D_', numD, '.RData', sep="")
-# to_save <- list(y=y, X=X, b=b, pos_m=res$m, pos_S=res$C, pos_draws=D)
-# save(to_save, file=filename, compress='xz')
+# # Save draws as Python pickle
+# py_save_object(r_to_py(params), 'draws.pkl')

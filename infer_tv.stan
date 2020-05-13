@@ -1,81 +1,90 @@
 data {
   int <lower=1> P; // number of dimensions 
-  int <lower=1> TS; // number of time steps   
-  int <lower=1> D; // number of latent factors
+  int <lower=1> F; // number of latent factors
+  int <lower=1> TS; // number of time steps
   real disc; // discount
-  vector[P] y[TS];
+  vector[P] x[TS];
 }
 transformed data {
-  vector[D] fac_mu = rep_vector(0, D);
-  int<lower=1> beta_l; // number of lower-triangular, non-zero loadings
-  beta_l = P * (P - D) + D * (D - 1) / 2;
+  vector[F] beta_diag = rep_vector(1.0, F);
+  int beta_l = F * (P - F) + F * (F - 1) / 2; // number of lower-triangular, non-zero loadings
 }
 parameters {
-  // Parameters
-  vector[D] fac[TS]; // latent factors
-  vector[D] log_f_sd[TS]; // log latent factor standard deviations
-  vector[D] log_f_sd_beta; // log latent factor standard deviation transform
-  vector[D] log_f_sd_bias; // log latent factor standard deviation bias
-  vector[beta_l] L_lower[TS]; // lower diagonal loadings
-  vector[beta_l] L_lower_beta; // lower diagonal transform
-  vector[beta_l] L_lower_bias; // lower diagonal bias
-  vector<lower=0>[beta_l] L_lower_sd; // lower diagonal standard deviations
-  vector<lower=0>[D] L_diag; // positive diagonal loadings
-  vector[P] log_y_sd; // y standard deviations
-  // Hyperparameters
-  vector<lower=0>[D] tau; // scale
-  cholesky_factor_corr[D] sigma_log_f_sd; //prior correlation
+  // nuisance parameters
+  vector[F] z_fac_sd[TS]; // reparameterised latent factors
+  vector[beta_l] z_beta_lower_sd[TS]; // reparameterised lower diagonal loading standard deviation
+  
+  // parameters
+  // vector<lower=0.0, upper=1.0>[F] f_sd; // latent factor standard deviation
+  vector[beta_l] beta_lower_loc; // lower diagonal loadings location
+  vector<lower=0.0, upper=1.0>[beta_l] beta_lower_scale; // lower diagonal loadings scale
+  // real<lower=0.0, upper=1.0> raw_beta_lower_scale; // lower diagonal loadings scale
+  // vector<lower=0>[F] beta_diag; // positive diagonal loadings
+  
+  // priors
+  // cholesky_factor_corr[F] log_f_sd_Omega;
+  // vector<lower=0>[F] log_f_sd_tau;
+  real<lower=0> raw_beta_lower_sd;
+  // cholesky_factor_corr[beta_l] beta_lower_Omega;
+  // vector<lower=0>[beta_l] beta_lower_tau;
+  // vector<lower=0>[P] x_sd;
+  real<lower=0> x_sd; // x standard deviation
 }
 transformed parameters {
-  matrix[P, D] beta [TS];
-  // cov_matrix[P] Q[TS];
-  vector[D] t_log_f_sd[TS];
-  vector[beta_l] t_L_lower[TS];
-  // beta[T] and Q[T]
-  for (t in 1:TS){ 
+  vector[beta_l] beta_lower[TS];
+  matrix[P, F] beta [TS];
+  
+  // vector[beta_l] beta_lower_scale = rep_vector(raw_beta_lower_scale, beta_l);
+  vector[beta_l] beta_lower_sd = rep_vector(raw_beta_lower_sd, beta_l);
+  // cholesky_factor_cov[F] chol_log_f_sd_sd = diag_pre_multiply(log_f_sd_tau, log_f_sd_Omega);
+  // cholesky_factor_cov[beta_l] beta_lower_sd = diag_pre_multiply(beta_lower_tau, beta_lower_Omega);
+
+  for (t in 1:TS){
+    beta_lower[t] = beta_lower_loc + beta_lower_sd .* z_beta_lower_sd[t];
+    // beta_lower[t] = beta_lower_loc + beta_lower_sd * z_beta_lower_sd[t];
+    if (t > 1){
+      beta_lower[t] += beta_lower_scale .* (beta_lower[t-1] - beta_lower_loc);
+      }
+      
+    {
     int idx;
     idx = 1;
-    for (j in 1:D) {
-      beta[t][j, j] = L_diag[j]; // set positive diagonal loadings
-      for (k in (j+1):D){
+    for (j in 1:F) {
+      beta[t][j, j] = beta_diag[j]; // set positive diagonal loadings
+      for (k in (j+1):F){
         beta[t][j, k] = 0; // set upper triangle values to 0
-      }
+        }
       for (i in (j+1):P){
-        beta[t][i, j] = L_lower[t][idx]; // set lower diagonal loadings
+        beta[t][i, j] = beta_lower[t][idx]; // set lower diagonal loadings
         idx = idx + 1;
+        }
       }
-    }
-  // Q[t] = tcrossprod(diag_post_multiply(beta[t], exp(log_f_sd[t]))) + diag_matrix(exp(2 * log_y_sd)); // specify covariance of y
-  if (t==1) {
-    t_log_f_sd[t] = log_f_sd[t];
-    t_L_lower[t] = L_lower[t];
-    }
-  else {
-    t_log_f_sd[t] = log_f_sd_bias + (log_f_sd_beta .* log_f_sd[t-1]);
-    t_L_lower[t] = L_lower_bias + (L_lower_beta .* L_lower[t-1]);
     }
   }
 }
 model {
-  vector[P] y_mu[TS];
-
+  vector[P] mu;
   // priors
-  log_f_sd[1] ~ normal(0, 1);  
-  L_lower[1] ~ normal(0, 1);
-  L_diag ~ gamma(2, 0.5);
-  tau ~ normal(0, 1);
-  sigma_log_f_sd ~ lkj_corr_cholesky(1);
-  L_lower_sd ~ gamma(2, 0.2);
-  log_y_sd ~ normal(0, 1);
+  // f_sd ~ normal(0, 0.5); 
+  beta_lower_loc ~ normal(0, 0.5);
+  beta_lower_scale ~ normal(0, 0.5);
+  // beta_lower_scale ~ cauchy(0, 0.1);
+  // beta_lower_scale ~ lognormal(-2, 1);
+  // beta_lower_scale ~ gamma(2, 1./20.);
+  // raw_beta_lower_scale ~ uniform(0, 1);
+  // beta_lower_scale ~ beta(2., 2.);
   
-  log_f_sd ~ multi_normal_cholesky(t_log_f_sd, diag_pre_multiply(tau, sigma_log_f_sd));
-  L_lower ~ multi_normal_cholesky(t_L_lower, disc * diag_matrix(L_lower_sd));
+  raw_beta_lower_sd ~ gamma (2, 1./20.);
+  x_sd ~ gamma (2, 1./10.);
   
   for (t in 1:TS){
-    // log_f_sd[t] ~ multi_normal_cholesky(log_f_sd[t-1], diag_pre_multiply(tau, sigma_f_sd));
-    // L_lower[t] ~ normal(L_lower[t-1], L_lower_sd);
-    fac[t] ~ multi_normal_cholesky(fac_mu, diag_matrix(exp(log_f_sd[t])));
-    y_mu[t] = beta[t] * fac[t];
+    z_fac_sd[t] ~ std_normal();
+    z_beta_lower_sd[t] ~ std_normal();
+    // x[t] ~ normal(beta[t] * (f_sd .* z_fac_sd[t]), x_sd);
+    x[t] ~ normal(beta[t] * z_fac_sd[t], x_sd);
+    // mu = beta[t] * z_fac_sd[t];
+    // for (p in 1:P){
+      // x[t][p] ~ normal(mu[p], x_sd[p]);
+    // }
   }
-  y ~ multi_normal_cholesky(y_mu, diag_matrix(exp(log_y_sd)));
 }

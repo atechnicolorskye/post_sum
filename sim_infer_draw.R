@@ -1,146 +1,92 @@
 library(Matrix)
 library(mvtnorm)
+
+library(reticulate)
+# use_python("/usr/bin/python")
+# use_python("/apps/python/3.6/3.6.3/bin/python3")
+np <- import("numpy")
+
 library(rstan)
 options(mc.cores = parallel::detectCores())
-rstan_options(auto_write = TRUE)
+# rstan_options(auto_write = TRUE)
 
-set.seed(1)
+seed <- 1
+set.seed(seed)
 
 # Simulate data according to Lopes and Carvalho (2007) without switching
 n_N <- 500
 n_F <- 5
-n_Y <- 10
+n_X <- 10
 n_D <- 2000
 n_W <- 1000
 AD <- 0.99
 TD <- 15
 
 # Create data strucutures
-Y <- array(0, c(n_N, n_Y))
-B <- array(0, c(n_Y, n_F))
+X <- matrix(0, n_N, n_X)
+B <- matrix(0, n_X, n_F)
 log_F_sigma <- array(0, c(n_F))
 
-# y hyperparameters 
-# y_sigma
-log_y_sigma <- rep(rnorm(1), n_Y)
+# x hyperparameters 
+# x_sigma
+log_x_sigma <- rep(rnorm(1), n_X)
 
-# x hyperparameters
+# f hyperparameters
 # Covariance
 log_f_sigma <- rnorm(n_F, mean=-1, sd=0.25)
 # chol_f_sigma <- diag(abs(rnorm(n_F, mean=0, sd=0.1)))
 chol_f_sigma <- matrix(rnorm(n_F * n_F, sd=0.1), c(n_F, n_F))
-diag(chol_f_sigma) <- abs(diag(chol_f_sigma))
+# diag(chol_f_sigma) <- abs(diag(chol_f_sigma))
 
 # B hyperparameters
 # Want B to be 'almost sparse' where B contains mostly values close to 0.05
 base_order <- 0.05
-# base_order <- 1
 bias_order <- 0.5
 p_connect <- 0.3
-n_connect <- p_connect * n_Y * n_F
-add <- (2 * rbinom(n_connect, 1, 0.5) - 1) * (bias_order + abs(rnorm(n_connect)))
-B_ <- base_order * rnorm(n_Y * n_F)
-B_[1:n_connect] <- B_[1:n_connect] + add
-B_ <- matrix(sample(B_), c(n_Y, n_F))
-# To ensure identifiability, set upper triangle to be 0 and diagonal to be 1
-B_ [upper.tri(B_)] <- 0
+B_ <- matrix(0, n_X, n_F)
 diag(B_) <- 1
+n_l_t <- sum(lower.tri(B_))
+B_[lower.tri(B_)] <- rnorm(n_l_t, 0, .05) +
+                      rbinom(n_l_t, 1, .3) * (2 * rbinom(n_l_t, 1, .5) - 1) * 
+                      # rnorm(n_l_t, bias_order, 1)
+                      (bias_order + abs(rnorm(n_l_t, 0, 1)))
+
+# n_connect <- p_connect * n_X * n_F
+# add <- (2 * rbinom(n_connect, 1, 0.5) - 1) * (bias_order + abs(rnorm(n_connect)))
+# B_ <- base_order * rnorm(n_X * n_F)
+# B_[1:n_connect] <- B_[1:n_connect] + add
+# B_ <- matrix(sample(B_), c(n_X, n_F))
+# # To ensure identifiability, set upper triangle to be 0 and diagonal to be 1
+# B_ [upper.tri(B_)] <- 0
+# diag(B_) <- 1
 
 # Initialise
 log_F_sigma <- as.vector(log_f_sigma + chol_f_sigma %*% rnorm(n_F))
-B <- B_ + base_order * lower.tri(matrix(rnorm(n_Y * n_F), c(n_Y, n_F)))
-plot(c(t(B_)) ~ c(t(B)), cex=2, pch=10, col="dark gray", xlab="Simulated Loadings", ylab="Estimated Loadings")
+B <- B_ + base_order * lower.tri(matrix(rnorm(n_X * n_F), c(n_X, n_F)))
+cov_X <- B %*% diag(exp(2 * log_F_sigma)) %*% t(B) + diag(exp(2 * log_x_sigma))
 
 # Generate data
 for (i in 1:n_N){
-  Y[i, ] <- B %*% t(rmvnorm(1, sigma=diag(exp(log_F_sigma)))) + exp(log_y_sigma) * rnorm(n_Y)
+  X[i, ] <- rmvnorm(1, sigma=cov_X)
 }
 
-fit <- stan(file='infer.stan', data=list(P=n_Y, N=n_N, D=n_F, y=Y), iter=n_D, warmup=n_W, refresh=2000, seed=1, control=list(adapt_delta=AD, max_treedepth=TD))
+# Standardise X
+# X_mu <- colMeans(X, dims = 1)
+# X_sd <- apply(X, 2, sd)
+# X_s <- t((t(X) - X_mu) / X_sd)
+
+fit <- stan(file='infer.stan', data=list(P=n_X, F=n_F, N=n_N, x=X), iter=n_D, warmup=n_W,
+            refresh=n_D, seed=seed, control=list(adapt_delta=AD, max_treedepth=TD))
 
 params <- extract(fit)
 beta_hat <- c(t(colMeans(params$beta, dims=1)))
-# png("beta_comp.png")
-plot(beta_hat ~ c(t(B)), cex=2, pch=10, col="dark gray", xlab="Simulated Loadings", ylab="Estimated Loadings")
+pdf("beta_comp.pdf")
+plot(c(t(B_)) ~ c(t(B)), cex=2, pch=10, col="dark gray", xlab="True Loadings", ylab="Noisy Loadings")
+plot(beta_hat ~ c(t(B)), cex=2, pch=10, col="dark gray", xlab="Noisy Simulated Loadings", ylab="Estimated Loadings")
 fit_B <- lm(beta_hat ~ c(t(B))) # Fit a linear model
 abline(fit_B)
 abline(0,1, lty = 2) # 1:1 line
-# dev.off()
-fac <- params$fac
+dev.off()
 
-# # David's code
-# MultiGeneralDLM = function(Y, X, m0, C0, n0, S0, deltaB, deltaE) 
-# {
-#   if (dim(Y)[1] == dim(X)[1]) {
-#     numT = dim(Y)[1]
-#   } else {
-#     stop("check X and Y dimensions")
-#   }
-#   numY <- dim(Y)[2]
-#   numX <- dim(X)[2]
-#   if (dim(C0)[1] != numX | dim(C0)[2] != numX) {
-#     stop("Check X,C0 dimension compatibility")
-#   }
-#   if (dim(as.matrix(S0))[1] != numY | dim(S0)[2] != numY) {
-#     stop("Check Y,S0 dimension compatibility")
-#   }
-#   # Data Structures
-#   S <- array(0, c(numT, numY, numY))
-#   m <- array(0, c(numT, numX, numY))
-#   R <- array(0, c(numT, numX, numX))
-#   W <- array(0, c(numT, numX, numX))
-#   C <- array(0, c(numT, numX, numX))
-#   f <- array(0, c(numT, numY))
-#   e <- array(0, c(numT, numY))
-#   Q <- numeric(numT)
-#   n <- numeric(numT)
-#   V <- numeric(numT) + 1  # Vt 
-#   At <- numeric(numX)
-#   
-#   # Priors at time 0 (t=1)
-#   m[1,,] <- m0
-#   C[1,,] <- C0
-#   S[1,,] <- S0
-#   n[1] <- n0
-#   
-#   # Recursion
-#   for (t in 2:(numT)) {
-#     # Prior at t W[t,,] = C[t-1,,]*(delta^-1 - 1) #Need we keep track of W? R[t,,] = C[t-1,,] + W[t,,] note a[t,,] = G%*%m[t-1,,], but G is identity matrix
-#     R[t,,] = C[t - 1,,]/deltaB
-#     W[t,,] = C[t-1,,]*(deltaB^-1 - 1)
-#     # Forecast for t using t-1 data
-#     f[t, ] = t(X[t - 1,]) %*% m[t - 1,,]
-#     Q[t] = V[t] + t(X[t - 1,]) %*% R[t,,] %*% X[t - 1,]
-#     # Posterior at t
-#     At = R[t,,] %*% X[t - 1,]/Q[t]
-#     e[t,] = as.numeric(Y[t - 1,] - f[t,])
-#     m[t,,] = m[t - 1,,] + At %*% t(e[t,])
-#     C[t,,] = R[t,,] - At %*% t(At) * Q[t]
-#     n[t] = deltaE * n[t - 1] + 1
-#     S[t,,] = n[t]^-1 * (deltaE * n[t - 1] * S[t - 1,,] + e[t, ] %*% t(e[t,])/Q[t])
-#     
-#   }
-#   return(list(m = m, C = C, n=n, S = S, R = R, W=W, muHat = f, Q = Q, error = e))
-# }
-
-# # Set hyperparameters for Normal-Inverse Wishart
-# m0 <- 0
-# c0 <- diag(numX)
-# S0 <- diag(numY)
-# n0 <- 1
-# deltaB <- 0.99
-# deltaE <- 0.99
-# 
-# res <- MultiGeneralDLM(y, X, m0, c0, n0, S0, deltaB, deltaE)
-# 
-# # Create data strucutures for posterior draws 
-# D <- array(0, c(numT, numD, numX))
-# 
-# # Draw from posterior
-# for (i in 1:numT){
-#   D[i, , ] <- mvrnorm(numD, res$m[i, , ], res$C[i, , ])
-# }
-# 
-# filename <- paste('sim_x_', numX, '_y_', numY,  '_T_', numT, '_D_', numD, '.RData', sep="")
-# to_save <- list(y=y, X=X, b=b, pos_m=res$m, pos_S=res$C, pos_draws=D)
-# save(to_save, file=filename, compress='xz')
+# Save draws as Python pickle
+# py_save_object(r_to_py(params), 'draws.pkl')
