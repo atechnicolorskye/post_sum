@@ -29,8 +29,8 @@ X <- array(0, c(n_T, n_X))
 B <- array(0, c(n_T, n_X, n_F))
 
 # x hyperparameters 
-x_sigma <- abs(rep(rnorm(1, sd=0.25), n_X))
-# x_sigma <- abs(rnorm(n_X, sd=0.25))
+# x_sigma <- abs(rep(rnorm(1, sd=0.25), n_X))
+x_sigma <- abs(rnorm(n_X, sd=0.25))
 # x_sigma <- rep(1, n_X)
 
 
@@ -50,16 +50,20 @@ B_loc[lower.tri(B_loc)] <- rnorm(n_l_t, 0, .05) +
                            rnorm(n_l_t, bias_order, 1)
                            # (bias_order + abs(rnorm(n_l_t)))
 B_scale <- matrix(0, n_X, n_F)
-B_scale[lower.tri(B_scale)] <- abs(rnorm(n_l_t, mean=0, sd=0.5)) # rbeta(n_l_t, 2, 2) # rep(0.5, n_l_t)
+B_scale[lower.tri(B_scale)] <- runif(n_l_t, 0, 1) # abs(rnorm(n_l_t, mean=0.5, sd=0.5)) # rbeta(n_l_t, 2, 2) # rep(0.5, n_l_t)
+B_sigma <- matrix(0, n_X, n_F)
+B_sigma[lower.tri(B_sigma)] <- abs(rnorm(n_l_t, mean=0, sd=0.2)) # rbeta(n_l_t, 2, 2) # rep(0.5, n_l_t)
 
 # Initialise
-B[1, , ] <- B_loc + base_order * lower.tri(B[1, , ]) * matrix(rnorm(n_X * n_F), c(n_X, n_F))
+# B[1, , ] <- B_loc + base_order * lower.tri(B[1, , ]) * matrix(rnorm(n_X * n_F), c(n_X, n_F))
+B[1, , ] <- B_loc + B_sigma * matrix(rnorm(n_X * n_F), c(n_X, n_F))
 # X[1, ] <- (B[1, , ] %*% (F_sigma * rnorm(n_F))) + x_sigma * rnorm(n_X)
 X[1, ] <- (B[1, , ] %*% rnorm(n_F)) + x_sigma * rnorm(n_X)
 
 # Generate data
 for (i in 2:n_T){
-  B[i, , ] <- B_loc + (B_scale * (B[i-1, , ] - B_loc)) + discount * base_order * lower.tri(B[i, , ]) * matrix(rnorm(n_X * n_F), c(n_X, n_F))
+  # B[i, , ] <- B_loc + (B_scale * (B[i-1, , ] - B_loc)) + discount * base_order * lower.tri(B[i, , ]) * matrix(rnorm(n_X * n_F), c(n_X, n_F))
+  B[i, , ] <- B_loc + (B_scale * (B[i-1, , ] - B_loc)) + discount * B_sigma * matrix(rnorm(n_X * n_F), c(n_X, n_F))
   X[i,  ] <- (B[i, , ] %*% rnorm(n_F)) + x_sigma * rnorm(n_X)
 }
 
@@ -92,11 +96,21 @@ stanfit <- read_stan_csv(fit$output_files())
 # print(log_F_sigma_scale)
 
 params <- extract(stanfit)
-# beta_lower_sd_hat <- colMeans(params$raw_beta_lower_sd, dims=1)
+x_sd_hat <- colMeans(params$x_sd, dims=1)
+beta_lower_sd_hat <- colMeans(params$beta_lower_sd, dims=1)
 beta_lower_loc_hat <- colMeans(params$beta_lower_loc, dims=1)
 beta_lower_scale_hat <- colMeans(params$beta_lower_scale, dims=1)
 # F_sigma_hat <- colMeans(params$f_sd, dims=1)
 # pdf("comp.pdf")
+par(pty="s")
+plot(c(x_sd_hat) ~ c(x_sigma), cex=2, pch=10, col="dark gray", xlab="Simulated X SD", ylab="Estimated X SD")
+fit_scale <- lm(c(x_sd_hat) ~ c(x_sigma)) # Fit a linear model
+abline(fit_scale)
+abline(0,1, lty = 2) # 1:1 line
+plot(c(beta_lower_sd_hat) ~ c(B_sigma[lower.tri(B_sigma)]), cex=2, pch=10, col="dark gray", xlab="Simulated Beta SD", ylab="Estimated Beta SD")
+fit_scale <- lm(c(beta_lower_sd_hat) ~ c(B_sigma[lower.tri(B_sigma)])) # Fit a linear model
+abline(fit_scale)
+abline(0,1, lty = 2) # 1:1 line
 plot(c(beta_lower_loc_hat) ~ c(B_loc[lower.tri(B_loc)]), cex=2, pch=10, col="dark gray", xlab="Simulated Beta Loc", ylab="Estimated Beta Loc")
 fit_scale <- lm(c(beta_lower_loc_hat) ~ c(B_loc[lower.tri(B_loc)])) # Fit a linear model
 abline(fit_scale)
