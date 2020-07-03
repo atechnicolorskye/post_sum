@@ -83,291 +83,291 @@ def objective(n_samples, S, K, Z_0, Z_1, Z_2, alpha, beta, psi):
     return obj
 
 
-def constrained_objective(n_samples, S, K, Z_0, Z_1, Z_2, beta, psi, emp_cov_reg):
-    """Objective function for constrained time-varying graphical LASSO."""
-    obj = sum(map(l1_od_norm, Z_0))
+# def constrained_objective(n_samples, S, K, Z_0, Z_1, Z_2, beta, psi, emp_cov_reg):
+#     """Objective function for constrained time-varying graphical LASSO."""
+#     obj = sum(map(l1_od_norm, Z_0))
 
-    if isinstance(beta, np.ndarray):
-        obj += sum(b[0][0] * m for b, m in zip(beta, map(psi, Z_2 - Z_1)))
-    else:
-        if 'kernel' not in psi.__name__:
-            obj += beta * sum(map(psi, Z_2 - Z_1))
-        else:
-            obj += 
-
-
-
-    return obj
-
-def constrained_time_graphical_lasso(
-        emp_cov, rho=1, beta=1, max_iter=100, n_samples=None,
-        verbose=False, psi='laplacian', gamma=None, constrained_to=None,
-        tol=1e-4, rtol=1e-4, return_history=False, return_n_iter=True, 
-        mode='admm', compute_objective=True, stop_at=None, stop_when=1e-4,
-        update_rho_options=None, init='empirical'):
-    """Constrained time-varying graphical LASSO solver.
-
-    Solves the following problem via ADMM:
-        min sum_{i=1}^T ||K_i||_{od,1} + beta sum_{i=2}^T Psi(K_i - K_{i-1})
-        s.t. log_likelihood(S_i, K_i) >= c_i
-
-    where S_i = (1/n_i) X_i^T X_i is the empirical covariance of data
-    matrix X (training observations by features).
-
-    Parameters
-    ----------
-    emp_cov : ndarray, shape (n_features, n_features)
-        Empirical covariance of data.
-    rho : float, optional
-        Augmented Lagrangian parameter.
-    max_iter : int, optional
-        Maximum number of iterations.
-    n_samples : ndarray
-        Number of samples available for each time point.
-    gamma: float, optional
-        Kernel parameter when psi is chosen to be 'kernel'.
-    constrained_to: float or ndarray, shape (time steps)
-        Log likelihood constraints for K_i
-    tol : float, optional
-        Absolute tolerance for convergence.
-    rtol : float, optional
-        Relative tolerance for convergence.
-    return_history : bool, optional
-        Return the history of computed values.
-    return_n_iter : bool, optional
-        Return the number of iteration before convergence.
-    verbose : bool, default False
-        Print info at each iteration.
-    update_rho_options : dict, optional
-        Arguments for the rho update.
-        See regain.update_rules.update_rho function for more information.
-    compute_objective : bool, default True
-        Choose to compute the objective value.
-    init : {'empirical', 'zero', ndarray}
-        Choose how to initialize the precision matrix, with the inverse
-        empirical covariance, zero matrix or precomputed.
-
-    Returns
-    -------
-    K : numpy.array, 3-dimensional (T x d x d)
-        Solution to the problem for each time t=1...T .
-    history : list
-        If return_history, then also a structure that contains the
-        objective value, the primal and dual residual norms, and tolerances
-        for the primal and dual residual norms at each iteration.
-
-    """
-    psi, prox_psi, psi_node_penalty = check_norm_prox(psi)
-
-    psi_name = psi.__name__
-
-    if 'kernel' in psi_name:
-        weights = np.zeros((emp_cov.shape[0], emp_cov.shape[0]))
-        for i in range(1, emp_cov.shape[0]):
-            weights += np.eye(emp_cov.shape[0], k=i) * np.exp(-gamma * i ** 2) 
-        weights = weights + weights.T
-        emp_cov_reg = beta / emp_cov.shape[0] * np.einsum('kl, lij -> kij', weights, emp_cov)
-
-    Z_0 = init_precision(emp_cov, mode=init)
-    if 'kernel' not in psi_name:
-        Z_0 = np.zeros_like(Z_0)
-        Z_1 = Z_0.copy()[:-1]  # np.zeros_like(emp_cov)[:-1]
-        Z_2 = Z_0.copy()[1:]  # np.zeros_like(emp_cov)[1:]
-
-    U_0 = np.zeros_like(Z_0)
-    if 'kernel' not in psi_name:
-        U_1 = np.zeros_like(Z_1)
-        U_2 = np.zeros_like(Z_2)
-
-    Z_0_old = np.zeros_like(Z_0)
-    if 'kernel' not in psi_name:
-        Z_1_old = np.zeros_like(Z_1)
-        Z_2_old = np.zeros_like(Z_2)
-
-    # divisor for consensus variables, accounting for two less matrices for t = 0 and t = T
-    if 'kernel' in psi_name:
-        divisor = np.full(emp_cov.shape[0], 1, dtype=float)
-    else:
-        divisor = np.full(emp_cov.shape[0], 2, dtype=float)
-        divisor[0] -= 1
-        divisor[-1] -= 1
-
-    if n_samples is None:
-        n_samples = np.ones(emp_cov.shape[0])
-
-    checks = [
-        convergence(
-            obj=objective(
-                n_samples, emp_cov, Z_0, Z_0, Z_1, Z_2, alpha, beta, psi))
-    ]
-
-    for iteration_ in range(max_iter):
-        # update K
-        if 'kernel' in psi_name
-            A = Z_0 - U_0
-        else:
-            A = Z_0
-            A[:-1] += Z_1 - U_1
-            A[1:] += Z_2 - U_2
-        A /= divisor[:, None, None]
-        # soft_thresholding_ = partial(soft_thresholding, lamda=alpha / rho)
-        # K = np.array(map(soft_thresholding_, A))
-        A += A.transpose(0, 2, 1)
-        A /= 2.
-
-        A *= -rho * divisor[:, None, None] / n_samples[:, None, None]
-        A += emp_cov + emp_cov_reg
-
-        K = np.array(
-            [
-                prox_logdet(a, lamda=ni / (rho * div))
-                for a, div, ni in zip(A, divisor, n_samples)
-            ])
-
-        # if constrained_to is not None:
-        #     # projection
-        #     loss_K = np.array([logl(c, k) for c, k in zip(emp_cov, K)])
-        #     if isinstance(constrained_to, np.ndarray):
-        #         slack = -np.array(constrained_to) + loss_K
-        #     else:
-        #         slack = -constrained_to + loss_k
-        #     indices = np.nonzero(slack < 0)
-        #     p = emp_cov.shape[1]
-        #     for i in indices[0]:
-        #         trace_term = np.sum(K[i, :, :] * emp_cov[i, :, :].T)
-        #         prod_log = lambertw((- np.exp((-slack[i] - trace_term) / p) * trace_term) / p) 
-        #         K[i, :, :] *= -p / trace_term * np.real(prod_log)
-
-            # 
-                # print(slack[i], -constrained_to[i] + logl(emp_cov[i, :, :], K[i, :, :]), prod_log) 
-
-        # pdb.set_trace()
-
-        # update Z_0
-        A = K + U_0
-        A += A.transpose(0, 2, 1)
-        A /= 2.
-        Z_0 = soft_thresholding(A, lamda=alpha / rho)
-
-        # other Zs
-        if 'kernel' not in psi_name:
-            A_1 = K[:-1] + U_1
-            A_2 = K[1:] + U_2
-            if not psi_node_penalty:
-                prox_e = prox_psi(A_2 - A_1, lamda=2. * beta / rho)
-                Z_1 = .5 * (A_1 + A_2 - prox_e)
-                Z_2 = .5 * (A_1 + A_2 + prox_e)
-            else:
-                Z_1, Z_2 = prox_psi(
-                    np.concatenate((A_1, A_2), axis=1), lamda=.5 * beta / rho,
-                    rho=rho, tol=tol, rtol=rtol, max_iter=max_iter)
-
-        # update residuals
-        U_0 += K - Z_0
-        if 'kernel' not in psi_name:
-            U_1 += K[:-1] - Z_1
-            U_2 += K[1:] - Z_2
-
-        # diagnostics, reporting, termination checks
-        if 'kernel' in psi_name:
-            rnorm = np.sqrt(squared_norm(K - Z_0))
-            snorm = rho * np.sqrt( squared_norm(Z_0 - Z_0_old))
-        else:
-            rnorm = np.sqrt(
-                squared_norm(K - Z_0) + squared_norm(K[:-1] - Z_1) +
-                squared_norm(K[1:] - Z_2))
-            snorm = rho * np.sqrt(
-                squared_norm(Z_0 - Z_0_old) + squared_norm(Z_1 - Z_1_old) +
-                squared_norm(Z_2 - Z_2_old))
-
-        if 'kernel' in psi_name:
-            obj = objective(
-                n_samples, emp_cov + emp_cov_reg, Z_0, K, Z_1, Z_2, alpha, beta, psi) \
-                if compute_objective else np.nan
-        else:
-            obj = objective(
-                n_samples, emp_cov, Z_0, K, Z_1, Z_2, alpha, beta, psi) \
-                if compute_objective else np.nan
+#     if isinstance(beta, np.ndarray):
+#         obj += sum(b[0][0] * m for b, m in zip(beta, map(psi, Z_2 - Z_1)))
+#     else:
+#         if 'kernel' not in psi.__name__:
+#             obj += beta * sum(map(psi, Z_2 - Z_1))
+#         else:
+#             obj += 
 
 
-        # if np.isinf(obj):
-        #     Z_0 = Z_0_old
-        #     break
 
-        if 'kernel' in psi_name:
-            check = convergence(
-                obj=obj,
-                rnorm=rnorm,
-                snorm=snorm,
-                e_pri=np.sqrt(K.size) * tol + rtol * max(
-                    np.sqrt(
-                        squared_norm(Z_0)),
-                    np.sqrt(
-                        squared_norm(K))),
-                e_dual=np.sqrt(K.size) * tol + rtol * rho *
-                    np.sqrt(squared_norm(U_0)),
-            )
-        else:
-            check = convergence(
-                obj=obj,
-                rnorm=rnorm,
-                snorm=snorm,
-                e_pri=np.sqrt(K.size + 2 * Z_1.size) * tol + rtol * max(
-                    np.sqrt(
-                        squared_norm(Z_0) + squared_norm(Z_1) + squared_norm(Z_2)),
-                    np.sqrt(
-                        squared_norm(K) + squared_norm(K[:-1]) +
-                        squared_norm(K[1:]))),
-                e_dual=np.sqrt(K.size + 2 * Z_1.size) * tol + rtol * rho *
-                    np.sqrt(squared_norm(U_0) + squared_norm(U_1) + squared_norm(U_2)),
-                # precision=Z_0.copy()
-            )
+#     return obj
+
+# def constrained_time_graphical_lasso(
+#         emp_cov, rho=1, beta=1, max_iter=100, n_samples=None,
+#         verbose=False, psi='laplacian', gamma=None, constrained_to=None,
+#         tol=1e-4, rtol=1e-4, return_history=False, return_n_iter=True, 
+#         mode='admm', compute_objective=True, stop_at=None, stop_when=1e-4,
+#         update_rho_options=None, init='empirical'):
+#     """Constrained time-varying graphical LASSO solver.
+
+#     Solves the following problem via ADMM:
+#         min sum_{i=1}^T ||K_i||_{od,1} + beta sum_{i=2}^T Psi(K_i - K_{i-1})
+#         s.t. log_likelihood(S_i, K_i) >= c_i
+
+#     where S_i = (1/n_i) X_i^T X_i is the empirical covariance of data
+#     matrix X (training observations by features).
+
+#     Parameters
+#     ----------
+#     emp_cov : ndarray, shape (n_features, n_features)
+#         Empirical covariance of data.
+#     rho : float, optional
+#         Augmented Lagrangian parameter.
+#     max_iter : int, optional
+#         Maximum number of iterations.
+#     n_samples : ndarray
+#         Number of samples available for each time point.
+#     gamma: float, optional
+#         Kernel parameter when psi is chosen to be 'kernel'.
+#     constrained_to: float or ndarray, shape (time steps)
+#         Log likelihood constraints for K_i
+#     tol : float, optional
+#         Absolute tolerance for convergence.
+#     rtol : float, optional
+#         Relative tolerance for convergence.
+#     return_history : bool, optional
+#         Return the history of computed values.
+#     return_n_iter : bool, optional
+#         Return the number of iteration before convergence.
+#     verbose : bool, default False
+#         Print info at each iteration.
+#     update_rho_options : dict, optional
+#         Arguments for the rho update.
+#         See regain.update_rules.update_rho function for more information.
+#     compute_objective : bool, default True
+#         Choose to compute the objective value.
+#     init : {'empirical', 'zero', ndarray}
+#         Choose how to initialize the precision matrix, with the inverse
+#         empirical covariance, zero matrix or precomputed.
+
+#     Returns
+#     -------
+#     K : numpy.array, 3-dimensional (T x d x d)
+#         Solution to the problem for each time t=1...T .
+#     history : list
+#         If return_history, then also a structure that contains the
+#         objective value, the primal and dual residual norms, and tolerances
+#         for the primal and dual residual norms at each iteration.
+
+#     """
+#     psi, prox_psi, psi_node_penalty = check_norm_prox(psi)
+
+#     psi_name = psi.__name__
+
+#     if 'kernel' in psi_name:
+#         weights = np.zeros((emp_cov.shape[0], emp_cov.shape[0]))
+#         for i in range(1, emp_cov.shape[0]):
+#             weights += np.eye(emp_cov.shape[0], k=i) * np.exp(-gamma * i ** 2) 
+#         weights = weights + weights.T
+#         emp_cov_reg = beta / emp_cov.shape[0] * np.einsum('kl, lij -> kij', weights, emp_cov)
+
+#     Z_0 = init_precision(emp_cov, mode=init)
+#     if 'kernel' not in psi_name:
+#         Z_0 = np.zeros_like(Z_0)
+#         Z_1 = Z_0.copy()[:-1]  # np.zeros_like(emp_cov)[:-1]
+#         Z_2 = Z_0.copy()[1:]  # np.zeros_like(emp_cov)[1:]
+
+#     U_0 = np.zeros_like(Z_0)
+#     if 'kernel' not in psi_name:
+#         U_1 = np.zeros_like(Z_1)
+#         U_2 = np.zeros_like(Z_2)
+
+#     Z_0_old = np.zeros_like(Z_0)
+#     if 'kernel' not in psi_name:
+#         Z_1_old = np.zeros_like(Z_1)
+#         Z_2_old = np.zeros_like(Z_2)
+
+#     # divisor for consensus variables, accounting for two less matrices for t = 0 and t = T
+#     if 'kernel' in psi_name:
+#         divisor = np.full(emp_cov.shape[0], 1, dtype=float)
+#     else:
+#         divisor = np.full(emp_cov.shape[0], 2, dtype=float)
+#         divisor[0] -= 1
+#         divisor[-1] -= 1
+
+#     if n_samples is None:
+#         n_samples = np.ones(emp_cov.shape[0])
+
+#     checks = [
+#         convergence(
+#             obj=objective(
+#                 n_samples, emp_cov, Z_0, Z_0, Z_1, Z_2, alpha, beta, psi))
+#     ]
+
+#     for iteration_ in range(max_iter):
+#         # update K
+#         if 'kernel' in psi_name
+#             A = Z_0 - U_0
+#         else:
+#             A = Z_0
+#             A[:-1] += Z_1 - U_1
+#             A[1:] += Z_2 - U_2
+#         A /= divisor[:, None, None]
+#         # soft_thresholding_ = partial(soft_thresholding, lamda=alpha / rho)
+#         # K = np.array(map(soft_thresholding_, A))
+#         A += A.transpose(0, 2, 1)
+#         A /= 2.
+
+#         A *= -rho * divisor[:, None, None] / n_samples[:, None, None]
+#         A += emp_cov + emp_cov_reg
+
+#         K = np.array(
+#             [
+#                 prox_logdet(a, lamda=ni / (rho * div))
+#                 for a, div, ni in zip(A, divisor, n_samples)
+#             ])
+
+#         # if constrained_to is not None:
+#         #     # projection
+#         #     loss_K = np.array([logl(c, k) for c, k in zip(emp_cov, K)])
+#         #     if isinstance(constrained_to, np.ndarray):
+#         #         slack = -np.array(constrained_to) + loss_K
+#         #     else:
+#         #         slack = -constrained_to + loss_k
+#         #     indices = np.nonzero(slack < 0)
+#         #     p = emp_cov.shape[1]
+#         #     for i in indices[0]:
+#         #         trace_term = np.sum(K[i, :, :] * emp_cov[i, :, :].T)
+#         #         prod_log = lambertw((- np.exp((-slack[i] - trace_term) / p) * trace_term) / p) 
+#         #         K[i, :, :] *= -p / trace_term * np.real(prod_log)
+
+#             # 
+#                 # print(slack[i], -constrained_to[i] + logl(emp_cov[i, :, :], K[i, :, :]), prod_log) 
+
+#         # pdb.set_trace()
+
+#         # update Z_0
+#         A = K + U_0
+#         A += A.transpose(0, 2, 1)
+#         A /= 2.
+#         Z_0 = soft_thresholding(A, lamda=alpha / rho)
+
+#         # other Zs
+#         if 'kernel' not in psi_name:
+#             A_1 = K[:-1] + U_1
+#             A_2 = K[1:] + U_2
+#             if not psi_node_penalty:
+#                 prox_e = prox_psi(A_2 - A_1, lamda=2. * beta / rho)
+#                 Z_1 = .5 * (A_1 + A_2 - prox_e)
+#                 Z_2 = .5 * (A_1 + A_2 + prox_e)
+#             else:
+#                 Z_1, Z_2 = prox_psi(
+#                     np.concatenate((A_1, A_2), axis=1), lamda=.5 * beta / rho,
+#                     rho=rho, tol=tol, rtol=rtol, max_iter=max_iter)
+
+#         # update residuals
+#         U_0 += K - Z_0
+#         if 'kernel' not in psi_name:
+#             U_1 += K[:-1] - Z_1
+#             U_2 += K[1:] - Z_2
+
+#         # diagnostics, reporting, termination checks
+#         if 'kernel' in psi_name:
+#             rnorm = np.sqrt(squared_norm(K - Z_0))
+#             snorm = rho * np.sqrt( squared_norm(Z_0 - Z_0_old))
+#         else:
+#             rnorm = np.sqrt(
+#                 squared_norm(K - Z_0) + squared_norm(K[:-1] - Z_1) +
+#                 squared_norm(K[1:] - Z_2))
+#             snorm = rho * np.sqrt(
+#                 squared_norm(Z_0 - Z_0_old) + squared_norm(Z_1 - Z_1_old) +
+#                 squared_norm(Z_2 - Z_2_old))
+
+#         if 'kernel' in psi_name:
+#             obj = objective(
+#                 n_samples, emp_cov + emp_cov_reg, Z_0, K, Z_1, Z_2, alpha, beta, psi) \
+#                 if compute_objective else np.nan
+#         else:
+#             obj = objective(
+#                 n_samples, emp_cov, Z_0, K, Z_1, Z_2, alpha, beta, psi) \
+#                 if compute_objective else np.nan
 
 
-        Z_0_old = Z_0.copy()
-        if 'kernel' not in psi_name:
-            Z_1_old = Z_1.copy()
-            Z_2_old = Z_2.copy()
+#         # if np.isinf(obj):
+#         #     Z_0 = Z_0_old
+#         #     break
 
-        if verbose:
-            print(
-                "obj: %.4f, rnorm: %.4f, snorm: %.4f,"
-                "eps_pri: %.4f, eps_dual: %.4f" % check[:5])
+#         if 'kernel' in psi_name:
+#             check = convergence(
+#                 obj=obj,
+#                 rnorm=rnorm,
+#                 snorm=snorm,
+#                 e_pri=np.sqrt(K.size) * tol + rtol * max(
+#                     np.sqrt(
+#                         squared_norm(Z_0)),
+#                     np.sqrt(
+#                         squared_norm(K))),
+#                 e_dual=np.sqrt(K.size) * tol + rtol * rho *
+#                     np.sqrt(squared_norm(U_0)),
+#             )
+#         else:
+#             check = convergence(
+#                 obj=obj,
+#                 rnorm=rnorm,
+#                 snorm=snorm,
+#                 e_pri=np.sqrt(K.size + 2 * Z_1.size) * tol + rtol * max(
+#                     np.sqrt(
+#                         squared_norm(Z_0) + squared_norm(Z_1) + squared_norm(Z_2)),
+#                     np.sqrt(
+#                         squared_norm(K) + squared_norm(K[:-1]) +
+#                         squared_norm(K[1:]))),
+#                 e_dual=np.sqrt(K.size + 2 * Z_1.size) * tol + rtol * rho *
+#                     np.sqrt(squared_norm(U_0) + squared_norm(U_1) + squared_norm(U_2)),
+#                 # precision=Z_0.copy()
+#             )
 
-        checks.append(check)
-        if stop_at is not None:
-            if abs(check.obj - stop_at) / abs(stop_at) < stop_when:
-                break
 
-        if check.rnorm <= check.e_pri and check.snorm <= check.e_dual:
-            break
+#         Z_0_old = Z_0.copy()
+#         if 'kernel' not in psi_name:
+#             Z_1_old = Z_1.copy()
+#             Z_2_old = Z_2.copy()
 
-        rho_new = update_rho(
-            rho, rnorm, snorm, iteration=iteration_,
-            **(update_rho_options or {}))
-        # scaled dual variables should be also rescaled
-        U_0 *= rho / rho_new
-        if 'kernel' not in psi_name:
-            U_1 *= rho / rho_new
-            U_2 *= rho / rho_new
-        rho = rho_new
+#         if verbose:
+#             print(
+#                 "obj: %.4f, rnorm: %.4f, snorm: %.4f,"
+#                 "eps_pri: %.4f, eps_dual: %.4f" % check[:5])
 
-        #assert is_pos_def(Z_0)
-    else:
-        warnings.warn("Objective did not converge.")
+#         checks.append(check)
+#         if stop_at is not None:
+#             if abs(check.obj - stop_at) / abs(stop_at) < stop_when:
+#                 break
 
-    covariance_ = np.array([linalg.pinvh(x) for x in Z_0])
-    return_list = [Z_0, covariance_]
-    if return_history:
-        return_list.append(checks)
-    if return_n_iter:
-        return_list.append(iteration_ + 1)
-    return return_list
+#         if check.rnorm <= check.e_pri and check.snorm <= check.e_dual:
+#             break
+
+#         rho_new = update_rho(
+#             rho, rnorm, snorm, iteration=iteration_,
+#             **(update_rho_options or {}))
+#         # scaled dual variables should be also rescaled
+#         U_0 *= rho / rho_new
+#         if 'kernel' not in psi_name:
+#             U_1 *= rho / rho_new
+#             U_2 *= rho / rho_new
+#         rho = rho_new
+
+#         #assert is_pos_def(Z_0)
+#     else:
+#         warnings.warn("Objective did not converge.")
+
+#     covariance_ = np.array([linalg.pinvh(x) for x in Z_0])
+#     return_list = [Z_0, covariance_]
+#     if return_history:
+#         return_list.append(checks)
+#     if return_n_iter:
+#         return_list.append(iteration_ + 1)
+#     return return_list
 
 
 def time_graphical_lasso(
         emp_cov, alpha=0.01, rho=1, beta=1, max_iter=100, n_samples=None,
-        verbose=False, psi='laplacian', gamma=None,
+        verbose=False, psi='laplacian', gamma=None, constrained_to=None,
         tol=1e-4, rtol=1e-4, return_history=False, return_n_iter=True, 
         mode='admm', compute_objective=True, stop_at=None, stop_when=1e-4,
         update_rho_options=None, init='empirical'):
@@ -432,6 +432,7 @@ def time_graphical_lasso(
         for i in range(1, emp_cov.shape[0]):
             weights += np.eye(emp_cov.shape[0], k=i) * np.exp(-gamma * i ** 2) 
         weights = weights + weights.T
+        pdb.set_trace()
         emp_cov_reg = beta / emp_cov.shape[0] * np.einsum('kl, lij -> kij', weights, emp_cov)
         beta = 0
     # else:
@@ -491,7 +492,7 @@ def time_graphical_lasso(
         A /= 2.
 
         A *= -rho * divisor[:, None, None] / n_samples[:, None, None]
-        A += emp_cov + emp_cov_reg
+        A += emp_cov # + emp_cov_reg
 
         K = np.array(
             [
@@ -690,7 +691,7 @@ class TimeGraphicalLasso(GraphicalLasso):
             max_iter=100, verbose=False, assume_centered=False, 
             return_history=False, update_rho_options=None, compute_objective=True, 
             stop_at=None, stop_when=1e-4, suppress_warn_list=False, init='empirical'):
-        super(TimeGraphicalLasso, self).__init__(
+        super().__init__(
             alpha=alpha, rho=rho, tol=tol, rtol=rtol, max_iter=max_iter,
             verbose=verbose, assume_centered=assume_centered, mode=mode,
             update_rho_options=update_rho_options,
@@ -752,6 +753,7 @@ class TimeGraphicalLasso(GraphicalLasso):
 
         """
         # Covariance does not make sense for a single feature
+        
         X, y = check_X_y(
             X, y, accept_sparse=False, dtype=np.float64, order="C",
             ensure_min_features=2, estimator=self)
@@ -771,15 +773,19 @@ class TimeGraphicalLasso(GraphicalLasso):
         emp_inv_score = []
         sam_inv_score = []
 
-        for i in range(self.classes_):
-            emp_cov.append(empirical_covariance(X[y == i], assume_centered=self.assume_centered))
-            emp_inv = np.linalg.inv(emp_cov[i])
-            _, log_det = np.linalg.slogdet(emp_inv)
-            emp_inv_score.append(log_det - np.trace(emp_cov[i] @ emp_inv))
-            sam_inv_score.append(log_det - np.array([np.trace(X[:, :, j, i] @ emp_inv) for j in range(n_samples)]))
+    
+        for i in self.classes_:
+            emp_cov_i = empirical_covariance(X[y == i], assume_centered=self.assume_centered)
+            emp_inv_i = np.linalg.inv(emp_cov_i)
+            _, log_det = np.linalg.slogdet(emp_inv_i)
+            emp_cov.append(emp_cov_i)
+            emp_inv_score.append(log_det - np.trace(emp_cov_i @ emp_inv_i))
+            sam_inv_score.append(log_det - np.array([np.trace((X[y == i][[j], :].T @ X[y == i][[j], :]) @ emp_inv_i) for j in range(int(n_samples))]))
 
         self.emp_inv_score = np.array(emp_inv_score)
         self.sam_inv_score = np.array(sam_inv_score)
+
+        self.constrained_to = None
 
         return self._fit(np.array(emp_cov), n_samples)
 
@@ -794,18 +800,21 @@ class TimeGraphicalLasso(GraphicalLasso):
         n_dimensions, _, n_samples, time_steps = X.shape
         
         emp_cov = []
+        emp_inv = []
         emp_inv_score = []
         sam_inv_score = []
 
         for i in range(time_steps):
             emp_cov.append(np.mean(X[:, :, :, i], 2))
-            emp_inv = np.linalg.inv(emp_cov[i])
-            _, log_det = np.linalg.slogdet(emp_inv)
-            emp_inv_score.append(log_det - np.trace(emp_cov[i] @ emp_inv))
-            sam_inv_score.append(log_det - np.array([np.trace(X[:, :, j, i] @ emp_inv) for j in range(n_samples)]))
+            emp_inv.append(np.linalg.inv(emp_cov[i]))
+            _, log_det = np.linalg.slogdet(emp_inv[i])
+            emp_inv_score.append(log_det - np.trace(emp_cov[i] @ emp_inv[i]))
+            sam_inv_score.append(log_det - np.array([np.trace(X[:, :, j, i] @ emp_inv[i]) for j in range(n_samples)]))
 
         self.emp_inv_score = np.array(emp_inv_score)
         self.sam_inv_score = np.array(sam_inv_score)
+
+        self.emp_inv = emp_inv
 
         self.constrained_to = np.quantile(self.sam_inv_score, 0.5, 1)
 
@@ -887,15 +896,31 @@ class TimeGraphicalLasso(GraphicalLasso):
             self.covariance_, comp_cov, norm=norm, scaling=scaling,
             squared=squared)
 
-    def eval_pre(self, X):
+    def eval_obs_pre(self, X, y):
         """Evaluate the log likelihood of estimated precisions compared to the inverse sample covariance at each time step
 
         Parameters
         ----------
-        X : ndarray, shape = (n_dimensions, n_dimensions, n_samples, time_steps)
-        
+        X : ndarray, shape = (n_samples * n_times, n_dimensions)
+            Data matrix.
+        y : ndarray, shape = (n_times,)
+            Indicate the temporal belonging of each sample.
         """
-        n_dimensions, _, n_samples, time_steps = X.shape
+        
+        X, y = check_X_y(
+            X, y, accept_sparse=False, dtype=np.float64, order="C",
+            ensure_min_features=2, estimator=self)
+
+        n_dimensions = X.shape[1]
+        self.classes_, n_samples = np.unique(y, return_counts=True)
+        n_times = self.classes_.size
+
+        # n_samples = np.array([x.shape[0] for x in X])
+        if self.assume_centered:
+            self.location_ = np.zeros((n_times, n_dimensions))
+        else:
+            self.location_ = np.array(
+                [X[y == cl].mean(0) for cl in self.classes_])
 
         precisions = self.get_observed_precision()
 
@@ -904,11 +929,37 @@ class TimeGraphicalLasso(GraphicalLasso):
         slack = []
 
         for i in range(precisions.shape[0]):
+            emp_cov = empirical_covariance(X[y == i] - self.location_[i], assume_centered=True)
+            precision = precisions[i, :, :]
+            # slack.append(-self.constrained_to[i] + logl(emp_cov, precision))
+            _, log_det = np.linalg.slogdet(precision)
+            emp_pre_score.append(log_det - np.trace(emp_cov @ precision))
+            sam_pre_score.append(log_det - np.array([np.trace((X[y == i][[j], :].T @ X[y == i][[j], :]) @ precision) for j in range(int(n_samples))]))
+
+        return self.emp_inv_score - np.array(emp_pre_score), self.sam_inv_score - np.array(sam_pre_score), precision
+
+    def eval_cov_pre(self, X, y=None):
+        """Evaluate the log likelihood of estimated precisions compared to the inverse sample covariance at each time step
+
+        Parameters
+        ----------
+        X : ndarray, shape = (n_dimensions, n_dimensions, n_samples, time_steps)
+        """
+        
+        n_dimensions, _, n_samples, time_steps = X.shape
+
+        precisions = self.precision_
+
+        emp_pre_score = []
+        sam_pre_score = []
+        slack = []
+
+        for i in range(precisions.shape[0]):
             emp_cov = np.mean(X[:, :, :, i], 2)
             precision = precisions[i, :, :]
-            slack.append(-self.constrained_to[i] + logl(emp_cov, precision))
+            # slack.append(-self.constrained_to[i] + logl(emp_cov, precision))
             _, log_det = np.linalg.slogdet(precision)
             emp_pre_score.append(log_det - np.trace(emp_cov @ precision))
             sam_pre_score.append(log_det - np.array([np.trace(X[:, :, j, i] @ precision) for j in range(n_samples)]))
 
-        return self.emp_inv_score - np.array(emp_pre_score), self.sam_inv_score - np.array(sam_pre_score), np.array(slack)
+        return self.emp_inv_score - np.array(emp_pre_score), self.sam_inv_score - np.array(sam_pre_score), precisions # np.array(slack)

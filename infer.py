@@ -12,13 +12,11 @@ import pickle
 seed = 1
 
 np.random.seed(seed)
-threads = 4
-os.environ['STAN_NUM_THREADS'] = str(threads)
 
-n_N = 100
+n_N = 500
 n_F = 5
 n_Y = 10
-n_D = 5000
+n_D = 2000
 n_W = 1000
 n_C = 4
 AD = 0.95
@@ -63,17 +61,16 @@ for i in range(1, n_N):
 
 dat = {
     'P': n_Y,
+    'F': n_F,
     'N': n_N,
-    'D': n_F,
     # 'fac_mu': np.zeros(n_F),
     'y': Y
     }
 
-extra_compile_args = ['-pthread', '-DSTAN_THREADS']
-model = pystan.StanModel(file='infer.stan', extra_compile_args=extra_compile_args)
-fit = model.sampling(data=dat, iter=n_D, warmup=n_W, seed=seed, chains=n_C, control={'adapt_delta':AD}, n_jobs=threads)
-with gzip.open('pystan_non_tv_fit_{}_{}_{}_{}_{}.gz'.format(n_D, n_W, seed, n_C, AD), 'wb') as f:
-    pickle.dump({'model' : model, 'fit' : fit}, f)
+model = pystan.StanModel(file='infer.stan')
+fit = model.sampling(data=dat, iter=n_D, warmup=n_W, seed=seed, chains=n_C, control={'adapt_delta':AD})
+# with gzip.open('pystan_non_tv_fit_{}_{}_{}_{}_{}.gz'.format(n_D, n_W, seed, n_C, AD), 'wb') as f:
+#     pickle.dump({'model' : model, 'fit' : fit}, f)
 res = fit.extract(pars=['beta', 'fac'])
 plt.scatter(B, np.mean(res['beta'], axis=0))
 plt.show()

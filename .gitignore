@@ -1,0 +1,17 @@
+# R
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+*.rds
+.Rapp.history
+
+# Python
+*.pyc
+
+# General
+*.pdf
+*.png
+
+# Folders
+dlm_code
