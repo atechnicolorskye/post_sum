@@ -15,10 +15,11 @@ set.seed(seed)
 
 # Simulate data according to Lopes and Carvalho (2007) without switching
 n_T <- 100
-n_F <- 5
-n_X <- 20
-n_D <- 1000
-n_W <- 1000
+n_F <- 3
+n_X <- 10
+n_D <- 100
+n_W <- 100
+n_C <- 4
 R <- 0.5
 AD <- 0.999
 TD <- 15
@@ -62,14 +63,12 @@ B_sigma <- 0.2
 # B_loc <- matrix(0, n_X, n_F)
 # diag(B_loc) <- 1
 B[1, , ] <- B_loc + B_sigma * lower.tri(B[1, , ]) * matrix(rnorm(n_X * n_F), c(n_X, n_F))
-# X[1, ] <- (B[1, , ] %*% (F_sigma * rnorm(n_F))) + x_sigma * rnorm(n_X)
 X[1, ] <- (B[1, , ] %*% rnorm(n_F)) + x_sigma * rnorm(n_X)
 
 # Generate data
 for (i in 2:n_T){
   B[i, , ] <- B_loc + (B_scale * (B[i-1, , ] - B_loc)) + discount * B_sigma * lower.tri(B[i, , ]) * matrix(rnorm(n_X * n_F), c(n_X, n_F))
   # B[i, , ] <- B_loc + (B_scale * (B[i-1, , ] - B_loc)) + discount * B_sigma * matrix(rnorm(n_X * n_F), c(n_X, n_F))
-  # B[i, , ] <- B_scale * B[i-1, , ] + discount * B_sigma * matrix(rnorm(n_X * n_F), c(n_X, n_F))
   X[i,  ] <- (B[i, , ] %*% rnorm(n_F)) + x_sigma * rnorm(n_X)
 }
 
@@ -86,20 +85,21 @@ start <- proc.time()
 fit <- model$sample(data=list(P=n_X, F=n_F, TS=n_T, disc=discount, x=X), 
                     num_samples=n_D, 
                     num_warmup=n_W, 
-                    refresh=500, 
+                    refresh=100, 
                     init=R, 
                     seed=seed, 
                     adapt_delta=AD, 
                     max_depth=TD, 
                     # stepsize=SS,
-                    num_chains=4,
+                    num_chains=n_C,
                     num_cores=getOption("mc.cores"))
 
 total <- proc.time() - start
 sprintf("Time taken: %f s", total[3])
 
 stanfit <- read_stan_csv(fit$output_files())
-saveRDS(stanfit, 'integrated_draws.rds')
+varstring <- paste(n_X, n_F, n_C, sep = "_")
+saveRDS(stanfit, paste0('integrated_draws_', varstring, '.rds'))
 
 # print(x_sigma)
 # print(chol_F_sigma) 
@@ -113,7 +113,7 @@ beta_lower_sd_hat <- mean(params$beta_lower_sd)
 beta_lower_loc_hat <- colMeans(params$beta_lower_loc, dims=1)
 beta_lower_scale_hat <- colMeans(params$beta_lower_scale, dims=1)
 # F_sigma_hat <- colMeans(params$f_sd, dims=1)
-pdf("integrated_comp.pdf")
+pdf(paste0('integrated_comp_', varstring, '.pdf'))
 par(pty="s")
 plot(c(x_sd_hat) ~ c(x_sigma), cex=2, pch=10, col="dark gray", xlab="Simulated X SD", ylab="Estimated X SD")
 fit_scale <- lm(c(x_sd_hat) ~ c(x_sigma)) # Fit a linear model

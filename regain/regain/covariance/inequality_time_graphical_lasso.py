@@ -45,28 +45,31 @@ from sklearn.utils.extmath import squared_norm
 from sklearn.utils.validation import check_X_y
 
 from regain.covariance.graphical_lasso_ import (
-    GraphicalLasso, init_precision, logl_old)
+    GraphicalLasso, init_precision, logl, dtrace)
 from regain.norm import l1_od_norm
-from regain.prox import prox_logdet, soft_thresholding
+from regain.prox import prox_logdet_alt, soft_thresholding_od, soft_thresholding_od_alt
 from regain.update_rules import update_rho
 from regain.utils import convergence, error_norm_time
 from regain.validation import check_norm_prox
 
 import pdb
 
-def loss(S, K, n_samples=None):
-    """Loss function for time-varying graphical LASSO."""
-    if n_samples is None:
-        n_samples = np.ones(S.shape[0])
-    return sum(
-        # -ni * logl(emp_cov, precision)
-        # for emp_cov, precision, ni in zip(S, K, n_samples))
-        -logl(emp_cov, precision) for emp_cov, precision in zip(S, K))
+def loss_gen(loss, S, K):
+    T, p, _, = S.shape
+    losses = np.zeros((T))
+    for i in range(T):
+        losses[i], _ = loss(S[i], K[i])
+    return losses
 
 
-def objective(n_samples, S, K, Z_0, Z_1, Z_2, alpha, beta, psi):
+def penalty_objective(Z_0, Z_1, Z_2, psi):
+    """Penalty-only objective function for time-varying graphical LASSO."""
+    return sum(map(l1_od_norm, Z_0)) + sum(map(psi, Z_2 - Z_1))
+
+
+def objective(loss, S, K, Z_0, Z_1, Z_2, psi, alpha=1, beta=1):
     """Objective function for time-varying graphical LASSO."""
-    obj = loss(S, K, n_samples=n_samples)
+    obj = loss_gen(loss, S, K)
 
     if isinstance(alpha, np.ndarray):
         obj += sum(l1_od_norm(a * z) for a, z in zip(alpha, Z_0))
@@ -84,17 +87,17 @@ def objective(n_samples, S, K, Z_0, Z_1, Z_2, alpha, beta, psi):
     return obj
 
 
-def time_graphical_lasso(
-        emp_cov, alpha=0.01, rho=1, beta=1, max_iter=100, n_samples=None,
-        verbose=False, psi='laplacian', gamma=None, constrained_to=None,
-        tol=1e-4, rtol=1e-4, return_history=False, return_n_iter=True, 
-        mode='admm', compute_objective=True, stop_at=None, stop_when=1e-4,
-        update_rho_options=None, init='empirical'):
-    """Time-varying graphical LASSO solver.
+def inequality_time_graphical_lasso(
+    S, K_init, max_iter, loss, C, rho, # n_samples=None, 
+    psi, gamma, tol, rtol, verbose, return_history, 
+    return_n_iter, mode, compute_objective, stop_at, 
+    stop_when, update_rho_options, init
+    ):
+    """Inequality constrained time-varying graphical LASSO solver.
 
     Solves the following problem via ADMM:
-        min sum_{i=1}^T -n_i log_likelihood(S_i, K_i) + alpha*||K_i||_{od,1}
-            + beta sum_{i=2}^T Psi(K_i - K_{i-1})
+        min sum_{i=1}^T ||K_i||_{od,1} + beta sum_{i=2}^T Psi(K_i - K_{i-1})
+        s.t. objective =< c_i for i = 1, ..., T
 
     where S_i = (1/n_i) X_i^T X_i is the empirical covariance of data
     matrix X (training observations by features).
@@ -146,161 +149,166 @@ def time_graphical_lasso(
 
     psi_name = psi.__name__
 
-    if 'kernel' in psi_name:
-        weights = np.zeros((emp_cov.shape[0], emp_cov.shape[0]))
-        for i in range(1, emp_cov.shape[0]):
-            weights += np.eye(emp_cov.shape[0], k=i) * np.exp(-gamma * i ** 2) 
-        weights = weights + weights.T
-        pdb.set_trace()
-        emp_cov_reg = beta / emp_cov.shape[0] * np.einsum('kl, lij -> kij', weights, emp_cov)
-        beta = 0
-    # else:
-    #     weights = None
-
-    Z_0 = init_precision(emp_cov, mode=init)
-    if 'kernel' in psi_name:
-        Z_1 = 0.
-        Z_2 = 0.    
+    if loss == 'LL':
+        loss_function = logl
     else:
-        Z_1 = Z_0.copy()[:-1]  # np.zeros_like(emp_cov)[:-1]
-        Z_2 = Z_0.copy()[1:]  # np.zeros_like(emp_cov)[1:]
+        loss_function = dtrace
+
+    K = K_init
+    Z_0 = K.copy()
+    Z_1 = K.copy()[:-1] 
+    Z_2 = K.copy()[1:]  
 
     U_0 = np.zeros_like(Z_0)
-    if 'kernel' in psi_name:
-        U_1 = 0.
-        U_2 = 0.
-    else:
-        U_1 = np.zeros_like(Z_1)
-        U_2 = np.zeros_like(Z_2)
+    U_1 = np.zeros_like(Z_1)
+    U_2 = np.zeros_like(Z_2)
 
     Z_0_old = np.zeros_like(Z_0)
-    if 'kernel' in psi_name:
-        Z_1_old = 0.
-        Z_2_old = 0.
-    else:
-        Z_1_old = np.zeros_like(Z_1)
-        Z_2_old = np.zeros_like(Z_2)
+    Z_1_old = np.zeros_like(Z_1)
+    Z_2_old = np.zeros_like(Z_2)
+
+    I = np.eye(S.shape[1])
 
     # divisor for consensus variables, accounting for two less matrices for t = 0 and t = T
-    if 'kernel' in psi_name:
-        divisor = np.full(emp_cov.shape[0], 1, dtype=float)
-    else:
-        divisor = np.full(emp_cov.shape[0], 3, dtype=float)
-        divisor[0] -= 1
-        divisor[-1] -= 1
+    penalty_divisor = np.full(S.shape[0], 2, dtype=float)
+    penalty_divisor[0] -= 1
+    penalty_divisor[-1] -= 1
 
-    if n_samples is None:
-        n_samples = np.ones(emp_cov.shape[0])
+    divisor = np.full(S.shape[0], 3, dtype=float)
+    divisor[0] -= 1
+    divisor[-1] -= 1
 
     checks = [
         convergence(
             obj=objective(
-                n_samples, emp_cov, Z_0, Z_0, Z_1, Z_2, alpha, beta, psi))
+                loss_function, S, K, Z_0, Z_1, Z_2, psi))
     ]
 
+    obj_loss = loss_gen(loss_function, S, Z_0)
+
+    # zeros out U_0, U_1, U_2 accordingly when switching between optimisation cycles
+    switch = np.zeros(S.shape[0])
+
     for iteration_ in range(max_iter):
-        # update K
-        A = Z_0 - U_0
-        if 'kernel' not in psi_name:
-            A[:-1] += Z_1 - U_1
-            A[1:] += Z_2 - U_2
-        A /= divisor[:, None, None]
-        # soft_thresholding_ = partial(soft_thresholding, lamda=alpha / rho)
-        # K = np.array(map(soft_thresholding_, A))
-        A += A.transpose(0, 2, 1)
-        A /= 2.
+        A_K_pen = np.zeros_like(Z_0)
+        A_K_pen[:-1] += Z_1 - U_1
+        A_K_pen[1:] += Z_2 - U_2
 
-        A *= -rho * divisor[:, None, None] # / n_samples[:, None, None]
-        A += emp_cov # + emp_cov_reg
+        A_K_obj = Z_0 - U_0 + A_K_pen
 
-        K = np.array(
-            [
-                # prox_logdet(a, lamda=ni / (rho * div))
-                # for a, div, ni in zip(A, divisor, n_samples)
-                prox_logdet(a, lamda=1 / (rho * div))
-                for a, div in zip(A, divisor)
-            ])
+        A_K_pen += A_K_pen.transpose(0, 2, 1)
+        A_K_pen /= 2.
 
-        # update Z_0
-        A = K + U_0
-        A += A.transpose(0, 2, 1)
-        A /= 2.
-        Z_0 = soft_thresholding(A, lamda=alpha / rho)
+        A_K_obj += A_K_obj.transpose(0, 2, 1)
+        A_K_obj /= 2.
+
+        A_Z = K + U_0
+        A_Z += A_Z.transpose(0, 2, 1)
+        A_Z /= 2.
+
+        for i in range(S.shape[0]):
+            if obj_loss[i] <= C[i]:
+                # update Z_0, don't update K as want convergence to only happen when feasible
+                if i == 0 or i == S.shape[0] - 1:
+                    Z_0[i] = soft_thresholding_od(A_K_pen[i] / penalty_divisor[i], lamda=1. / rho)
+                else:
+                    Z_0[i] = soft_thresholding_od_alt(A_K_pen[i] / penalty_divisor[i], lamda=1. / rho)  
+            else:
+                # update K
+                if loss_function == logl:
+                    A_K_obj[i] *= rho 
+                    A_K_obj[i] -= S[i]
+                    K[i] = prox_logdet_alt(A_K_obj[i], lamda= rho * divisor[i])
+                elif loss_function == dtrace:
+                    A_K_obj[i] += I
+                    K[i] = np.linalg.inv(2 * S[i] + 3 * rho) @ A_K_obj[i]
+                # update Z_0
+                Z_0[i] = soft_thresholding_od(A_Z[i], lamda=1. / rho)
 
         # other Zs
-        if 'kernel' not in psi_name:
-            A_1 = K[:-1] + U_1
-            A_2 = K[1:] + U_2
-            if not psi_node_penalty:
-                prox_e = prox_psi(A_2 - A_1, lamda=2. * beta / rho)
-                Z_1 = .5 * (A_1 + A_2 - prox_e)
-                Z_2 = .5 * (A_1 + A_2 + prox_e)
-            else:
-                Z_1, Z_2 = prox_psi(
-                    np.concatenate((A_1, A_2), axis=1), lamda=.5 * beta / rho,
-                    rho=rho, tol=tol, rtol=rtol, max_iter=max_iter)
+        A_1 = K[:-1] + U_1
+        A_2 = K[1:] + U_2
+        if not psi_node_penalty:
+            prox_e = prox_psi(A_2 - A_1, lamda=2. / rho)
+            Z_1 = .5 * (A_1 + A_2 - prox_e)
+            Z_2 = .5 * (A_1 + A_2 + prox_e)
+        else:
+            Z_1, Z_2 = prox_psi(
+                np.concatenate((A_1, A_2), axis=1), lamda=.5 / rho,
+                rho=rho, tol=tol, rtol=rtol, max_iter=max_iter)
 
         # update residuals
         U_0 += K - Z_0
-        if 'kernel' not in psi_name:
-            U_1 += K[:-1] - Z_1
-            U_2 += K[1:] - Z_2
+        U_1 += K[:-1] - Z_1
+        U_2 += K[1:] - Z_2
 
         # diagnostics, reporting, termination checks
-        if 'kernel' in psi_name:
-            rnorm = np.sqrt(squared_norm(K - Z_0))
-            snorm = rho * np.sqrt( squared_norm(Z_0 - Z_0_old))
-        else:
-            rnorm = np.sqrt(
-                squared_norm(K - Z_0) + squared_norm(K[:-1] - Z_1) +
-                squared_norm(K[1:] - Z_2))
-            snorm = rho * np.sqrt(
-                squared_norm(Z_0 - Z_0_old) + squared_norm(Z_1 - Z_1_old) +
-                squared_norm(Z_2 - Z_2_old))
+        rnorm = np.sqrt(
+            squared_norm(K - Z_0) + squared_norm(K[:-1] - Z_1) +
+            squared_norm(K[1:] - Z_2))
+        snorm = rho * np.sqrt(
+            squared_norm(Z_0 - Z_0_old) + squared_norm(Z_1 - Z_1_old) +
+            squared_norm(Z_2 - Z_2_old))
 
-        if 'kernel' in psi_name:
-            obj = objective(
-                n_samples, emp_cov + emp_cov_reg, Z_0, K, Z_1, Z_2, alpha, beta, psi) \
-                if compute_objective else np.nan
-        else:
-            obj = objective(
-                n_samples, emp_cov, Z_0, K, Z_1, Z_2, alpha, beta, psi) \
-                if compute_objective else np.nan
+        obj_loss = loss_gen(loss_function, S, Z_0)
 
-        if 'kernel' in psi_name:
-            check = convergence(
-                obj=obj,
-                rnorm=rnorm,
-                snorm=snorm,
-                e_pri=np.sqrt(K.size) * tol + rtol * max(
-                    np.sqrt(
-                        squared_norm(Z_0)),
-                    np.sqrt(
-                        squared_norm(K))),
-                e_dual=np.sqrt(K.size) * tol + rtol * rho *
-                    np.sqrt(squared_norm(U_0)),
-            )
-        else:
-            check = convergence(
-                obj=obj,
-                rnorm=rnorm,
-                snorm=snorm,
-                e_pri=np.sqrt(K.size + 2 * Z_1.size) * tol + rtol * max(
-                    np.sqrt(
-                        squared_norm(Z_0) + squared_norm(Z_1) + squared_norm(Z_2)),
-                    np.sqrt(
-                        squared_norm(K) + squared_norm(K[:-1]) +
-                        squared_norm(K[1:]))),
-                e_dual=np.sqrt(K.size + 2 * Z_1.size) * tol + rtol * rho *
-                    np.sqrt(squared_norm(U_0) + squared_norm(U_1) + squared_norm(U_2)),
-                # precision=Z_0.copy()
-            )
+        # set U[i]s to 0
+        for i in range(S.shape[0]):
+            # if obj_loss[i] < C[i] and switch[i] == 0:
+            #     continue
+            if obj_loss[i] <= C[i] and switch[i] == 1:
+                switch[i] == 0
+                # Z_0[i] = K[i]
+                # U_0[i] = np.zeros_like(Z_0[i])
+                # if i == 0:
+                #     U_1[i] = np.zeros_like(Z_0[i])
+                # elif i == S.shape[0] - 1:
+                #     U_2[i-1] = np.zeros_like(Z_0[i])
+                # else:
+                #     U_1[i] = np.zeros_like(Z_0[i])
+                #     U_2[i-1] = np.zeros_like(Z_0[i])
+                U_0 = np.zeros_like(Z_0)
+                U_1 = np.zeros_like(Z_1)
+                U_2 = np.zeros_like(Z_2)
+            elif obj_loss[i] > C[i] and switch[i] == 0:
+                switch[i] == 1
+                # if i == 0:
+                #     U_1[i] = np.zeros_like(Z_0[i])
+                # elif i == S.shape[0] - 1:
+                #     U_2[i-1] = np.zeros_like(Z_0[i])
+                # else:
+                #     U_1[i] = np.zeros_like(Z_0[i])
+                #     U_2[i-1] = np.zeros_like(Z_0[i])
+                U_0 = np.zeros_like(Z_0)
+                U_1 = np.zeros_like(Z_1)
+                U_2 = np.zeros_like(Z_2)
+            # else:
+            #     continue
 
+
+        obj = objective(loss_function, S, K, Z_0, Z_1, Z_2, psi)
+
+        # pdb.set_trace()
+
+        check = convergence(
+            obj=obj,
+            rnorm=rnorm,
+            snorm=snorm,
+            e_pri=np.sqrt(K.size + 2 * Z_1.size) * tol + rtol * max(
+                np.sqrt(
+                    squared_norm(Z_0) + squared_norm(Z_1) + squared_norm(Z_2)),
+                np.sqrt(
+                    squared_norm(K) + squared_norm(K[:-1]) +
+                    squared_norm(K[1:]))),
+            e_dual=np.sqrt(K.size + 2 * Z_1.size) * tol + rtol * rho *
+                np.sqrt(squared_norm(U_0) + squared_norm(U_1) + squared_norm(U_2)),
+        )
+
+        # to figure out behaviour and storage of suitable Z_0s
 
         Z_0_old = Z_0.copy()
-        if 'kernel' not in psi_name:
-            Z_1_old = Z_1.copy()
-            Z_2_old = Z_2.copy()
+        Z_1_old = Z_1.copy()
+        Z_2_old = Z_2.copy()
 
         if verbose:
             print(
@@ -315,15 +323,14 @@ def time_graphical_lasso(
         if check.rnorm <= check.e_pri and check.snorm <= check.e_dual:
             break
 
-        rho_new = update_rho(
-            rho, rnorm, snorm, iteration=iteration_,
-            **(update_rho_options or {}))
-        # scaled dual variables should be also rescaled
-        U_0 *= rho / rho_new
-        if 'kernel' not in psi_name:
-            U_1 *= rho / rho_new
-            U_2 *= rho / rho_new
-        rho = rho_new
+        # rho_new = update_rho(
+        #     rho, rnorm, snorm, iteration=iteration_,
+        #     **(update_rho_options or {}))
+        # # scaled dual variables should be also rescaled
+        # U_0 *= rho / rho_new
+        # U_1 *= rho / rho_new
+        # U_2 *= rho / rho_new
+        # rho = rho_new
 
     else:
         warnings.warn("Objective did not converge.")
@@ -337,7 +344,7 @@ def time_graphical_lasso(
     return return_list
 
 
-class TimeGraphicalLasso(GraphicalLasso):
+class InequalityTimeGraphicalLasso(GraphicalLasso):
     """Sparse inverse covariance estimation with an l1-penalized estimator.
 
     Parameters
@@ -406,21 +413,42 @@ class TimeGraphicalLasso(GraphicalLasso):
         Number of iterations run.
 
     """
+    # def __init__(
+    #         self, alpha=0.01, beta=1., mode='admm', rho=1., tol=1e-4,
+    #         rtol=1e-4, psi='laplacian', gamma=None, constrained_to=None, 
+    #         max_iter=100, verbose=False, assume_centered=False, 
+    #         return_history=False, update_rho_options=None, compute_objective=True, 
+    #         stop_at=None, stop_when=1e-4, suppress_warn_list=False, init='empirical'):
+    #     super().__init__(
+    #         alpha=alpha, rho=rho, tol=tol, rtol=rtol, max_iter=max_iter,
+    #         verbose=verbose, assume_centered=assume_centered, mode=mode,
+    #         update_rho_options=update_rho_options,
+    #         compute_objective=compute_objective, init=init)
+    #     self.beta = beta
+    #     self.psi = psi
+    #     self.gamma = gamma
+    #     self.constrained_to = constrained_to
+    #     self.return_history = return_history
+    #     self.stop_at = stop_at
+    #     self.stop_when = stop_when
+    #     self.suppress_warn_list = suppress_warn_list
     def __init__(
-            self, alpha=0.01, beta=1., mode='admm', rho=1., tol=1e-4,
-            rtol=1e-4, psi='laplacian', gamma=None, constrained_to=None, 
-            max_iter=100, verbose=False, assume_centered=False, 
-            return_history=False, update_rho_options=None, compute_objective=True, 
+            self, max_iter=1000, loss='LL', c_level=None, rho=1e1,
+            psi='laplacian', gamma=None, tol=1e-4, rtol=1e-4, mode='admm',   
+            verbose=False, assume_centered=False, return_history=False, 
+            update_rho_options=None, compute_objective=True, 
             stop_at=None, stop_when=1e-4, suppress_warn_list=False, init='empirical'):
         super().__init__(
-            alpha=alpha, rho=rho, tol=tol, rtol=rtol, max_iter=max_iter,
+            alpha=1., rho=rho, tol=tol, rtol=rtol, max_iter=max_iter,
             verbose=verbose, assume_centered=assume_centered, mode=mode,
             update_rho_options=update_rho_options,
             compute_objective=compute_objective, init=init)
-        self.beta = beta
+        self.max_iter = max_iter
+        self.loss = loss
+        self.c_level = c_level
+        self.rho = rho
         self.psi = psi
         self.gamma = gamma
-        self.constrained_to = constrained_to
         self.return_history = return_history
         self.stop_at = stop_at
         self.stop_when = stop_when
@@ -437,8 +465,8 @@ class TimeGraphicalLasso(GraphicalLasso):
         """
         return self.get_precision()
 
-    def _fit(self, emp_cov, n_samples):
-        """Fit the TimeGraphicalLasso model to X.
+    def _fit(self, emp_cov):
+        """Fit the InequalityTimeGraphicalLasso model to X.
 
         Parameters
         ----------
@@ -447,15 +475,21 @@ class TimeGraphicalLasso(GraphicalLasso):
 
         """
 
-        out = time_graphical_lasso(
-            emp_cov, alpha=self.alpha, rho=self.rho, beta=self.beta,
-            mode=self.mode, n_samples=n_samples, tol=self.tol, rtol=self.rtol,
-            psi=self.psi, max_iter=self.max_iter, gamma=self.gamma,
-            constrained_to=self.constrained_to, verbose=self.verbose, 
-            return_n_iter=True, return_history=self.return_history,
-            update_rho_options=self.update_rho_options,
-            compute_objective=self.compute_objective, stop_at=self.stop_at,
-            stop_when=self.stop_when, init=self.init)
+        # out = inequality_time_graphical_lasso(
+        #     emp_cov, alpha=self.alpha, rho=self.rho, beta=self.beta,
+        #     mode=self.mode, n_samples=n_samples, tol=self.tol, rtol=self.rtol,
+        #     psi=self.psi, max_iter=self.max_iter, gamma=self.gamma,
+        #     constrained_to=self.constrained_to, verbose=self.verbose, 
+        #     return_n_iter=True, return_history=self.return_history,
+        #     update_rho_options=self.update_rho_options,
+        #     compute_objective=self.compute_objective, stop_at=self.stop_at,
+        #     stop_when=self.stop_when, init=self.init)
+        out = inequality_time_graphical_lasso(
+              emp_cov, self.emp_inv, max_iter=self.max_iter, loss=self.loss, C=self.C, rho=self.rho, # n_samples=self.n_samples, 
+              psi=self.psi, gamma=self.gamma, tol=self.tol, rtol=self.rtol, 
+              verbose=self.verbose, return_history=self.return_history, return_n_iter=True,  
+              mode=self.mode, compute_objective=self.compute_objective, stop_at=self.stop_at,
+              stop_when=self.stop_when, update_rho_options=self.update_rho_options, init=self.init)
         if self.return_history:
             self.precision_, self.covariance_, self.history_, self.n_iter_ = out
         else:
@@ -463,7 +497,7 @@ class TimeGraphicalLasso(GraphicalLasso):
         return self
 
     def fit_obs(self, X, y):
-        """Fit the TimeGraphicalLasso model to observations.
+        """Fit the InequalityTimeGraphicalLasso model to observations.
 
         Parameters
         ----------
@@ -511,7 +545,7 @@ class TimeGraphicalLasso(GraphicalLasso):
         return self._fit(np.array(emp_cov), n_samples)
 
     def fit_cov(self, X):
-        """Fit the TimeGraphicalLasso model to covariances.
+        """Fit the InequalityTimeGraphicalLasso model to covariances.
 
         Parameters
         ----------
@@ -520,26 +554,30 @@ class TimeGraphicalLasso(GraphicalLasso):
         """
         n_dimensions, _, n_samples, time_steps = X.shape
         
-        emp_cov = []
-        emp_inv = []
-        emp_inv_score = []
-        sam_inv_score = []
+        self.emp_cov = []
+        self.emp_inv = []
+        self.emp_inv_score = []
+        self.sam_inv_score = []
+        self.C = []
 
         for i in range(time_steps):
-            emp_cov.append(np.mean(X[:, :, :, i], 2))
-            emp_inv.append(np.linalg.inv(emp_cov[i]))
-            _, log_det = np.linalg.slogdet(emp_inv[i])
-            emp_inv_score.append(log_det - np.trace(emp_cov[i] @ emp_inv[i]))
-            sam_inv_score.append(log_det - np.array([np.trace(X[:, :, j, i] @ emp_inv[i]) for j in range(n_samples)]))
+            self.emp_cov.append(np.mean(X[:, :, :, i], 2))
+            self.emp_inv.append(np.linalg.inv(self.emp_cov[i]))
+            if self.loss == 'LL':
+                self.emp_inv_score.append(-logl(self.emp_cov[i], self.emp_inv[i])[0])
+                self.sam_inv_score.append(np.array([-logl(X[:, :, j, i], self.emp_inv[i])[0] for j in range(n_samples)]))
+            else:
+                self.emp_inv_score.append(-dtrace(self.emp_cov[i], self.emp_inv[i])[0])
+                self.sam_inv_score.append(np.array([-dtrace(X[:, :, j, i], self.emp_inv[i])[0] for j in range(n_samples)]))
+            self.C.append(np.quantile(self.sam_inv_score[i], 1 - self.c_level, 0))
 
-        self.emp_inv_score = np.array(emp_inv_score)
-        self.sam_inv_score = np.array(sam_inv_score)
+        self.emp_cov = np.array(self.emp_cov)
+        self.emp_inv = np.array(self.emp_inv)
 
-        self.emp_inv = emp_inv
+        self.emp_inv_score = np.array(self.emp_inv_score)
+        self.sam_inv_score = np.array(self.sam_inv_score)
 
-        self.constrained_to = np.quantile(self.sam_inv_score, 0.5, 1)
-
-        return self._fit(np.array(emp_cov), np.ones(time_steps) * n_samples)
+        return self._fit(self.emp_cov)
 
     def score(self, X, y):
         """Computes the log-likelihood of a Gaussian data set with
@@ -659,7 +697,7 @@ class TimeGraphicalLasso(GraphicalLasso):
 
         return self.emp_inv_score - np.array(emp_pre_score), self.sam_inv_score - np.array(sam_pre_score), precision
 
-    def eval_cov_pre(self, X, y=None):
+    def eval_cov_pre(self):
         """Evaluate the log likelihood of estimated precisions compared to the inverse sample covariance at each time step
 
         Parameters
@@ -667,20 +705,15 @@ class TimeGraphicalLasso(GraphicalLasso):
         X : ndarray, shape = (n_dimensions, n_dimensions, n_samples, time_steps)
         """
         
-        n_dimensions, _, n_samples, time_steps = X.shape
-
         precisions = self.precision_
 
-        emp_pre_score = []
-        sam_pre_score = []
-        slack = []
+        fit_score = []
 
         for i in range(precisions.shape[0]):
-            emp_cov = np.mean(X[:, :, :, i], 2)
-            precision = precisions[i, :, :]
-            # slack.append(-self.constrained_to[i] + logl(emp_cov, precision))
-            _, log_det = np.linalg.slogdet(precision)
-            emp_pre_score.append(log_det - np.trace(emp_cov @ precision))
-            sam_pre_score.append(log_det - np.array([np.trace(X[:, :, j, i] @ precision) for j in range(n_samples)]))
+            precision = precisions[i]
+            if self.loss == 'LL':
+                fit_score.append(logl(self.emp_cov[i], precision)[0])
+            else:
+                fit_score.append(dtrace(self.emp_cov[i], precision)[0])
 
-        return self.emp_inv_score - np.array(emp_pre_score), self.sam_inv_score - np.array(sam_pre_score), precisions # np.array(slack)
+        return self.emp_inv_score, self.C, fit_score, precisions 

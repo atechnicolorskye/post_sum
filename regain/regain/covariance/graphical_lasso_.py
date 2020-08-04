@@ -55,14 +55,86 @@ except ImportError:
     # sklearn < 0.20
     from sklearn.covariance import GraphLasso
 
+import pdb
 
-def logl(emp_cov, precision):
+
+def rbf_weights(T, bandwidth):
+    """RBF Weights"""
+    weights = np.zeros((T, T))
+    for i in range(T):
+        time_diff = np.arange(-i, T-i)
+        weights[i] = np.exp(-time_diff ** 2 / bandwidth)
+        weights[i] = weights[i] / np.sum(weights[i])
+    return weights + np.eye(T)
+
+
+def linear_weights(T, bandwidth):
+    """Linear Weights"""
+    weights = np.zeros((T, T))
+    for i in range(T):
+        time_diff = np.arange(-i, T-i)
+        weights[i] = np.exp(-np.abs(time_diff) / bandwidth)
+        weights[i] = weights[i] / np.sum(weights[i])
+    return weights + np.eye(T)
+
+
+def logl_old(emp_cov, precision):
     """Gaussian log-likelihood without constant term."""
     return fast_logdet(precision) - np.sum(emp_cov * precision)
 
 
+def logl(emp_cov, precision):
+    """Gaussian log-likelihood without constant term."""
+    trace_term = np.sum(emp_cov * precision)
+    return trace_term - fast_logdet(precision), trace_term 
+
+
+def dtrace(emp_cov, precision):
+    """D Trace Loss."""
+    trace_squared_term = np.sum(precision @ precision * emp_cov)
+    return trace_squared_term - np.trace(precision), trace_squared_term
+
+
+def weighted_loss(loss, S, K, weights):
+    """Weighted Loss"""
+    T, p, _ = S.shape
+    losses = np.ones((T))
+    for i in range(T):
+        losses[i], _ = loss(S[i], K[i])
+    losses = np.einsum('ij->j', weights) * losses
+    return np.sum(losses)
+
+
+def dtrace_constraint(emp_cov, precision, constraint):
+    trace_squared_term = np.sum((precision @ precision) * emp_cov)
+    pre_diag = np.diag(precision)
+    loss = trace_squared_term - np.sum(pre_diag)
+    if loss > constraint:
+        b_ = precision * emp_cov
+        np.fill_diagonal(b_, 0)
+        pre_cov_row = np.einsum('ij->j', b_)
+        f = 2 * np.sum(pre_diag * pre_cov_row)
+        g = np.sum(pre_diag ** 2 * np.diag(emp_cov))
+        e = trace_squared_term - f - g
+        # c = c - np.sum(pre_diag) - constraint
+        with warnings.catch_warnings():
+            warnings.filterwarnings('error')
+            try:
+                sqrt_term = np.sqrt(np.sum(pre_diag) ** 2 - 4 * trace_squared_term * -constraint)
+                root_n = (-np.sum(pre_diag) - sqrt_term) / (2 * trace_squared_term)
+                root_p = (-np.sum(pre_diag) + sqrt_term) / (2 * trace_squared_term)
+            except RuntimeWarning:
+                pdb.set_trace()
+                sqrt_term = np.sqrt(np.sum(pre_diag) ** 2 - 4 * (e - f + g) * -constraint)
+                root_n = (np.sum(pre_diag) - sqrt_term) / (2 * trace_squared_term)
+                root_p = (np.sum(pre_diag) + sqrt_term) / (2 * trace_squared_term)
+        return loss, root_n, root_p
+    else:
+        return loss, 0, 0
+
+
 def objective(emp_cov, x, z, alpha):
-    return -logl(emp_cov, x) + l1_od_norm(alpha * z)
+    return -logl_old(emp_cov, x) + l1_od_norm(alpha * z)
 
 
 def init_precision(emp_cov, mode='empirical'):
@@ -261,7 +333,7 @@ class GraphicalLasso(GraphLasso):
             self, alpha=0.01, rho=1., over_relax=1., max_iter=100, mode='admm',
             tol=1e-4, rtol=1e-4, verbose=False, assume_centered=False,
             update_rho_options=None, compute_objective=True, init='empirical'):
-        super(GraphicalLasso, self).__init__(
+        super().__init__(
             alpha=alpha, tol=tol, max_iter=max_iter, verbose=verbose,
             assume_centered=assume_centered, mode=mode)
         self.rho = rho

@@ -41,6 +41,8 @@ from sklearn.utils.extmath import squared_norm
 from regain.update_rules import update_rho
 from regain.utils import convergence
 
+import pdb
+
 try:
     from prox_tv import tv1_1d, tvp_1d, tvgen, tvp_2d
 except:
@@ -74,6 +76,34 @@ def soft_thresholding_od(a, lamda):
             out[t] = _soft_thresholding_od_2d(a[t], lamda[t])
     else:
         out = _soft_thresholding_od_2d(a, lamda)
+    return out
+
+
+def _soft_thresholding_od_2d_alt(a, lamda):
+    # this assumes array is 2-dimensional
+    # no check is performed for optimisation
+    ones = (np.abs(a) > lamda) * a
+    soft = np.sign(ones) * (np.abs(ones) - 0.5 * lamda )
+    np.fill_diagonal(soft, np.diag(a))
+    return soft
+
+
+def soft_thresholding_od_alt(a, lamda):
+    """Off-diagonal soft-thresholding."""
+    if a.ndim > 2:
+        out = np.empty_like(a)
+        if not isinstance(lamda, collections.Iterable):
+            lamda = np.repeat(lamda, a.shape[0])
+        else:
+            assert lamda.shape[0] == a.shape[0]
+
+        for t in range(a.shape[0]):
+            if t == 0 or t == a.shape[0] - 1:
+                out[t] = _soft_thresholding_od_2d(a[t], lamda[t])
+            else:
+                out[t] = _soft_thresholding_od_2d_alt(a[t], lamda[t])
+    else:
+        out = _soft_thresholding_od_2d_alt(a, lamda)
     return out
 
 
@@ -151,6 +181,8 @@ def blockwise_soft_thresholding_symmetric(a, lamda):
 #       xk = zeros(size(w)); % if t is big, then solution is zero
 #     end
 # end
+
+
 def prox_linf_1d(a, lamda):
     """Proximal operator for the l-inf norm.
 
@@ -174,10 +206,29 @@ def prox_linf(a, lamda):
     return x
 
 
+def prox_logdet_constrained(A, a, I):
+    """Time-varying latent variable graphical lasso prox."""
+    es, Q = np.linalg.eigh(A) 
+    xi = (es + np.sqrt(np.square(es) + 4. * a)) / 2. 
+    return np.linalg.multi_dot((Q, np.diag(xi), Q.T))
+
+
+def prox_dtrace_constrained(A, S, a, I):
+    """Time-varying latent variable graphical lasso prox."""
+    return np.linalg.inv(2 * a * S + I) @ (A + a * I)
+
+
 def prox_logdet(a, lamda):
     """Time-varying latent variable graphical lasso prox."""
     es, Q = np.linalg.eigh(a)
     xi = (-es + np.sqrt(np.square(es) + 4. / lamda)) * lamda / 2.
+    return np.linalg.multi_dot((Q, np.diag(xi), Q.T))
+
+
+def prox_logdet_alt(a, lamda):
+    """Time-varying graphical lasso prox."""
+    es, Q = np.linalg.eigh(a)
+    xi = (es + np.sqrt(np.square(es) + 4. * lamda)) / (2. *  lamda)
     return np.linalg.multi_dot((Q, np.diag(xi), Q.T))
 
 
