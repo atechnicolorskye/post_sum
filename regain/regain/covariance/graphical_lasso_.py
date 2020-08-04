@@ -78,12 +78,12 @@ def linear_weights(T, bandwidth):
     return weights + np.eye(T)
 
 
-def logl_old(emp_cov, precision):
+def logl(emp_cov, precision):
     """Gaussian log-likelihood without constant term."""
     return fast_logdet(precision) - np.sum(emp_cov * precision)
 
 
-def logl(emp_cov, precision):
+def neg_logl(emp_cov, precision):
     """Gaussian log-likelihood without constant term."""
     trace_term = np.sum(emp_cov * precision)
     return trace_term - fast_logdet(precision), trace_term 

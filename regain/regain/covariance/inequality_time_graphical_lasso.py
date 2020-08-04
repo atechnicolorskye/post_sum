@@ -45,7 +45,7 @@ from sklearn.utils.extmath import squared_norm
 from sklearn.utils.validation import check_X_y
 
 from regain.covariance.graphical_lasso_ import (
-    GraphicalLasso, init_precision, logl, dtrace)
+    GraphicalLasso, init_precision, neg_logl, dtrace)
 from regain.norm import l1_od_norm
 from regain.prox import prox_logdet_alt, soft_thresholding_od, soft_thresholding_od_alt
 from regain.update_rules import update_rho
@@ -150,7 +150,7 @@ def inequality_time_graphical_lasso(
     psi_name = psi.__name__
 
     if loss == 'LL':
-        loss_function = logl
+        loss_function = neg_logl
     else:
         loss_function = dtrace
 
@@ -215,7 +215,7 @@ def inequality_time_graphical_lasso(
                     Z_0[i] = soft_thresholding_od_alt(A_K_pen[i] / penalty_divisor[i], lamda=1. / rho)  
             else:
                 # update K
-                if loss_function == logl:
+                if loss_function == neg_logl:
                     A_K_obj[i] *= rho 
                     A_K_obj[i] -= S[i]
                     K[i] = prox_logdet_alt(A_K_obj[i], lamda= rho * divisor[i])
@@ -564,11 +564,11 @@ class InequalityTimeGraphicalLasso(GraphicalLasso):
             self.emp_cov.append(np.mean(X[:, :, :, i], 2))
             self.emp_inv.append(np.linalg.inv(self.emp_cov[i]))
             if self.loss == 'LL':
-                self.emp_inv_score.append(-logl(self.emp_cov[i], self.emp_inv[i])[0])
-                self.sam_inv_score.append(np.array([-logl(X[:, :, j, i], self.emp_inv[i])[0] for j in range(n_samples)]))
+                self.emp_inv_score.append(neg_logl(self.emp_cov[i], self.emp_inv[i])[0])
+                self.sam_inv_score.append(np.array([neg_logl(X[:, :, j, i], self.emp_inv[i])[0] for j in range(n_samples)]))
             else:
-                self.emp_inv_score.append(-dtrace(self.emp_cov[i], self.emp_inv[i])[0])
-                self.sam_inv_score.append(np.array([-dtrace(X[:, :, j, i], self.emp_inv[i])[0] for j in range(n_samples)]))
+                self.emp_inv_score.append(dtrace(self.emp_cov[i], self.emp_inv[i])[0])
+                self.sam_inv_score.append(np.array([dtrace(X[:, :, j, i], self.emp_inv[i])[0] for j in range(n_samples)]))
             self.C.append(np.quantile(self.sam_inv_score[i], 1 - self.c_level, 0))
 
         self.emp_cov = np.array(self.emp_cov)
@@ -712,7 +712,7 @@ class InequalityTimeGraphicalLasso(GraphicalLasso):
         for i in range(precisions.shape[0]):
             precision = precisions[i]
             if self.loss == 'LL':
-                fit_score.append(logl(self.emp_cov[i], precision)[0])
+                fit_score.append(neg_logl(self.emp_cov[i], precision)[0])
             else:
                 fit_score.append(dtrace(self.emp_cov[i], precision)[0])
 

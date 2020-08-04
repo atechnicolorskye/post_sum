@@ -45,7 +45,7 @@ from sklearn.utils.extmath import squared_norm
 from sklearn.utils.validation import check_X_y
 
 from regain.covariance.graphical_lasso_ import (
-    GraphicalLasso, init_precision, logl, dtrace, dtrace_constraint)
+    GraphicalLasso, init_precision, neg_logl, dtrace, dtrace_constraint)
 from regain.norm import l1_od_norm
 from regain.prox import prox_logdet, soft_thresholding, soft_thresholding_od, prox_logdet_constrained, prox_dtrace_constrained
 from regain.update_rules import update_rho
@@ -60,7 +60,7 @@ import pdb
 #     loss = 0
 #     mult = np.ones((T, 1, 1))
 #     for i in range(T):
-#         neg_loss_t, trace_term = logl(S[i], K[i])
+#         neg_loss_t, trace_term = neg_logl(S[i], K[i])
 #         loss_t = -neg_loss_t
 #         loss += loss_t
 #         if loss_t > C[i]:
@@ -166,7 +166,7 @@ def equality_time_graphical_lasso(
     psi_name = psi.__name__
 
     if loss == 'LL':
-        loss_function = logl
+        loss_function = neg_logl
     else:
         loss_function = dtrace
 
@@ -209,7 +209,7 @@ def equality_time_graphical_lasso(
         A_Z += A_Z.transpose(0, 2, 1)
         A_Z /= 2.
 
-        if loss_function == logl:
+        if loss_function == neg_logl:
             A_Z -= residual_loss_constraint_u[:, None, None] * S
             Z_0 = np.array(
                 [
@@ -500,11 +500,11 @@ class EqualityTimeGraphicalLasso(GraphicalLasso):
             self.emp_cov.append(np.mean(X[:, :, :, i], 2))
             self.emp_inv.append(np.linalg.inv(self.emp_cov[i]))
             if self.loss == 'LL':
-                self.emp_inv_score.append(-logl(self.emp_cov[i], self.emp_inv[i])[0])
-                self.sam_inv_score.append(np.array([-logl(X[:, :, j, i], self.emp_inv[i])[0] for j in range(n_samples)]))
+                self.emp_inv_score.append(neg_logl(self.emp_cov[i], self.emp_inv[i])[0])
+                self.sam_inv_score.append(np.array([neg_logl(X[:, :, j, i], self.emp_inv[i])[0] for j in range(n_samples)]))
             else:
-                self.emp_inv_score.append(-dtrace(self.emp_cov[i], self.emp_inv[i])[0])
-                self.sam_inv_score.append(np.array([-dtrace(X[:, :, j, i], self.emp_inv[i])[0] for j in range(n_samples)]))
+                self.emp_inv_score.append(dtrace(self.emp_cov[i], self.emp_inv[i])[0])
+                self.sam_inv_score.append(np.array([dtrace(X[:, :, j, i], self.emp_inv[i])[0] for j in range(n_samples)]))
             self.C.append(np.quantile(self.sam_inv_score[i], 1 - self.c_level, 0))
 
         self.emp_cov = np.array(self.emp_cov)
@@ -647,8 +647,8 @@ class EqualityTimeGraphicalLasso(GraphicalLasso):
         for i in range(precisions.shape[0]):
             precision = precisions[i]
             if self.loss == 'LL':
-                fit_score.append(-logl(self.emp_cov[i], precision)[0])
+                fit_score.append(neg_logl(self.emp_cov[i], precision)[0])
             else:
-                fit_score.append(-dtrace(self.emp_cov[i], precision)[0])
+                fit_score.append(dtrace(self.emp_cov[i], precision)[0])
 
         return self.emp_inv_score, self.C, fit_score, precisions 
