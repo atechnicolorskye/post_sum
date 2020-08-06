@@ -45,9 +45,9 @@ from sklearn.utils.extmath import squared_norm
 from sklearn.utils.validation import check_X_y
 
 from regain.covariance.graphical_lasso_ import (
-    GraphicalLasso, init_precision, logl_old)
+    GraphicalLasso, init_precision, logl)
 from regain.norm import l1_od_norm
-from regain.prox import prox_logdet, soft_thresholding
+from regain.prox import prox_logdet, soft_thresholding, soft_thresholding_od
 from regain.update_rules import update_rho
 from regain.utils import convergence, error_norm_time
 from regain.validation import check_norm_prox
@@ -151,7 +151,6 @@ def time_graphical_lasso(
         for i in range(1, emp_cov.shape[0]):
             weights += np.eye(emp_cov.shape[0], k=i) * np.exp(-gamma * i ** 2) 
         weights = weights + weights.T
-        pdb.set_trace()
         emp_cov_reg = beta / emp_cov.shape[0] * np.einsum('kl, lij -> kij', weights, emp_cov)
         beta = 0
     # else:
@@ -225,7 +224,7 @@ def time_graphical_lasso(
         A = K + U_0
         A += A.transpose(0, 2, 1)
         A /= 2.
-        Z_0 = soft_thresholding(A, lamda=alpha / rho)
+        Z_0 = soft_thresholding_od(A, lamda=alpha / rho)
 
         # other Zs
         if 'kernel' not in psi_name:
@@ -520,16 +519,16 @@ class TimeGraphicalLasso(GraphicalLasso):
         """
         n_dimensions, _, n_samples, time_steps = X.shape
         
-        emp_cov = []
+        self.emp_cov = []
         emp_inv = []
         emp_inv_score = []
         sam_inv_score = []
 
         for i in range(time_steps):
-            emp_cov.append(np.mean(X[:, :, :, i], 2))
-            emp_inv.append(np.linalg.inv(emp_cov[i]))
+            self.emp_cov.append(np.mean(X[:, :, :, i], 2))
+            emp_inv.append(np.linalg.inv(self.emp_cov[i]))
             _, log_det = np.linalg.slogdet(emp_inv[i])
-            emp_inv_score.append(log_det - np.trace(emp_cov[i] @ emp_inv[i]))
+            emp_inv_score.append(log_det - np.trace(self.emp_cov[i] @ emp_inv[i]))
             sam_inv_score.append(log_det - np.array([np.trace(X[:, :, j, i] @ emp_inv[i]) for j in range(n_samples)]))
 
         self.emp_inv_score = np.array(emp_inv_score)
@@ -539,7 +538,7 @@ class TimeGraphicalLasso(GraphicalLasso):
 
         self.constrained_to = np.quantile(self.sam_inv_score, 0.5, 1)
 
-        return self._fit(np.array(emp_cov), np.ones(time_steps) * n_samples)
+        return self._fit(np.array(self.emp_cov), np.ones(time_steps) * n_samples)
 
     def score(self, X, y):
         """Computes the log-likelihood of a Gaussian data set with
@@ -659,28 +658,43 @@ class TimeGraphicalLasso(GraphicalLasso):
 
         return self.emp_inv_score - np.array(emp_pre_score), self.sam_inv_score - np.array(sam_pre_score), precision
 
-    def eval_cov_pre(self, X, y=None):
-        """Evaluate the log likelihood of estimated precisions compared to the inverse sample covariance at each time step
+    # def eval_cov_pre(self, X, y=None):
+    #     """Evaluate the log likelihood of estimated precisions compared to the inverse sample covariance at each time step
 
-        Parameters
-        ----------
-        X : ndarray, shape = (n_dimensions, n_dimensions, n_samples, time_steps)
-        """
+    #     Parameters
+    #     ----------
+    #     X : ndarray, shape = (n_dimensions, n_dimensions, n_samples, time_steps)
+    #     """
         
-        n_dimensions, _, n_samples, time_steps = X.shape
+    #     n_dimensions, _, n_samples, time_steps = X.shape
+
+    #     precisions = self.precision_
+
+    #     emp_pre_score = []
+    #     sam_pre_score = []
+    #     slack = []
+
+    #     for i in range(precisions.shape[0]):
+    #         emp_cov = np.mean(X[:, :, :, i], 2)
+    #         precision = precisions[i, :, :]
+    #         # slack.append(-self.constrained_to[i] + logl(emp_cov, precision))
+    #         _, log_det = np.linalg.slogdet(precision)
+    #         emp_pre_score.append(log_det - np.trace(emp_cov @ precision))
+    #         sam_pre_score.append(log_det - np.array([np.trace(X[:, :, j, i] @ precision) for j in range(n_samples)]))
+
+    #     return self.emp_inv_score - np.array(emp_pre_score), self.sam_inv_score - np.array(sam_pre_score), precisions # np.array(slack)
+
+    def eval_cov_pre(self):
+        """
+        Evaluate the log likelihood of estimated precisions compared to the inverse sample covariance at each time step
+        """
 
         precisions = self.precision_
 
-        emp_pre_score = []
-        sam_pre_score = []
-        slack = []
+        fit_score = []
 
         for i in range(precisions.shape[0]):
-            emp_cov = np.mean(X[:, :, :, i], 2)
-            precision = precisions[i, :, :]
-            # slack.append(-self.constrained_to[i] + logl(emp_cov, precision))
-            _, log_det = np.linalg.slogdet(precision)
-            emp_pre_score.append(log_det - np.trace(emp_cov @ precision))
-            sam_pre_score.append(log_det - np.array([np.trace(X[:, :, j, i] @ precision) for j in range(n_samples)]))
-
-        return self.emp_inv_score - np.array(emp_pre_score), self.sam_inv_score - np.array(sam_pre_score), precisions # np.array(slack)
+            precision = precisions[i]
+            fit_score.append(-logl(self.emp_cov[i], precision))
+        
+        return fit_score, precisions 

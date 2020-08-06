@@ -47,7 +47,7 @@ from sklearn.utils.validation import check_X_y
 from regain.covariance.graphical_lasso_ import (
     GraphicalLasso, init_precision, neg_logl, dtrace)
 from regain.norm import l1_od_norm
-from regain.prox import prox_logdet_alt, soft_thresholding_od, soft_thresholding_od_alt
+from regain.prox import prox_logdet_alt, soft_thresholding_od, soft_thresholding_od_alt, prox_logdet
 from regain.update_rules import update_rho
 from regain.utils import convergence, error_norm_time
 from regain.validation import check_norm_prox
@@ -67,10 +67,10 @@ def penalty_objective(Z_0, Z_1, Z_2, psi):
     return sum(map(l1_od_norm, Z_0)) + sum(map(psi, Z_2 - Z_1))
 
 
-def objective(loss, S, K, Z_0, Z_1, Z_2, psi, alpha=1, beta=1):
+def objective(loss, S, K, Z_0, Z_1, Z_2, psi, alpha=1., beta=1.):
     """Objective function for time-varying graphical LASSO."""
-    obj = loss_gen(loss, S, K)
-
+    obj = sum(loss_gen(loss, S, K))
+    
     if isinstance(alpha, np.ndarray):
         obj += sum(l1_od_norm(a * z) for a, z in zip(alpha, Z_0))
     else:
@@ -154,7 +154,7 @@ def inequality_time_graphical_lasso(
     else:
         loss_function = dtrace
 
-    K = K_init
+    K = init_precision(S, mode=init)
     Z_0 = K.copy()
     Z_1 = K.copy()[:-1] 
     Z_2 = K.copy()[1:]  
@@ -195,16 +195,11 @@ def inequality_time_graphical_lasso(
         A_K_pen[1:] += Z_2 - U_2
 
         A_K_obj = Z_0 - U_0 + A_K_pen
-
-        A_K_pen += A_K_pen.transpose(0, 2, 1)
-        A_K_pen /= 2.
-
         A_K_obj += A_K_obj.transpose(0, 2, 1)
         A_K_obj /= 2.
 
-        A_Z = K + U_0
-        A_Z += A_Z.transpose(0, 2, 1)
-        A_Z /= 2.
+        A_K_pen += A_K_pen.transpose(0, 2, 1)
+        A_K_pen /= 2.
 
         for i in range(S.shape[0]):
             if obj_loss[i] <= C[i]:
@@ -216,14 +211,18 @@ def inequality_time_graphical_lasso(
             else:
                 # update K
                 if loss_function == neg_logl:
-                    A_K_obj[i] *= rho 
+                    A_K_obj[i] *= rho
                     A_K_obj[i] -= S[i]
                     K[i] = prox_logdet_alt(A_K_obj[i], lamda= rho * divisor[i])
                 elif loss_function == dtrace:
                     A_K_obj[i] += I
                     K[i] = np.linalg.inv(2 * S[i] + 3 * rho) @ A_K_obj[i]
                 # update Z_0
-                Z_0[i] = soft_thresholding_od(A_Z[i], lamda=1. / rho)
+                A_Z = K[i] + U_0[i]
+                A_Z += A_Z.transpose(1, 0)
+                A_Z /= 2.
+                Z_0[i] = soft_thresholding_od(A_Z, lamda=1. / rho)
+                U_0[i] += K[i] - Z_0[i]
 
         # other Zs
         A_1 = K[:-1] + U_1
@@ -238,7 +237,7 @@ def inequality_time_graphical_lasso(
                 rho=rho, tol=tol, rtol=rtol, max_iter=max_iter)
 
         # update residuals
-        U_0 += K - Z_0
+        # U_0 += K - Z_0
         U_1 += K[:-1] - Z_1
         U_2 += K[1:] - Z_2
 
@@ -258,15 +257,15 @@ def inequality_time_graphical_lasso(
             #     continue
             if obj_loss[i] <= C[i] and switch[i] == 1:
                 switch[i] == 0
-                # Z_0[i] = K[i]
-                # U_0[i] = np.zeros_like(Z_0[i])
-                # if i == 0:
-                #     U_1[i] = np.zeros_like(Z_0[i])
-                # elif i == S.shape[0] - 1:
-                #     U_2[i-1] = np.zeros_like(Z_0[i])
-                # else:
-                #     U_1[i] = np.zeros_like(Z_0[i])
-                #     U_2[i-1] = np.zeros_like(Z_0[i])
+            #     # Z_0[i] = K[i]
+            #     U_0[i] = np.zeros_like(Z_0[i])
+            #     if i == 0:
+            #         U_1[i] = np.zeros_like(Z_0[i])
+            #     elif i == S.shape[0] - 1:
+            #         U_2[i-1] = np.zeros_like(Z_0[i])
+            #     else:
+            #         U_1[i] = np.zeros_like(Z_0[i])
+            #         U_2[i-1] = np.zeros_like(Z_0[i])
                 U_0 = np.zeros_like(Z_0)
                 U_1 = np.zeros_like(Z_1)
                 U_2 = np.zeros_like(Z_2)
@@ -285,7 +284,6 @@ def inequality_time_graphical_lasso(
             # else:
             #     continue
 
-
         obj = objective(loss_function, S, K, Z_0, Z_1, Z_2, psi)
 
         # pdb.set_trace()
@@ -301,7 +299,7 @@ def inequality_time_graphical_lasso(
                     squared_norm(K) + squared_norm(K[:-1]) +
                     squared_norm(K[1:]))),
             e_dual=np.sqrt(K.size + 2 * Z_1.size) * tol + rtol * rho *
-                np.sqrt(squared_norm(U_0) + squared_norm(U_1) + squared_norm(U_2)),
+                np.sqrt(squared_norm(U_0) + squared_norm(U_1) + squared_norm(U_2))
         )
 
         # to figure out behaviour and storage of suitable Z_0s
@@ -323,14 +321,14 @@ def inequality_time_graphical_lasso(
         if check.rnorm <= check.e_pri and check.snorm <= check.e_dual:
             break
 
-        # rho_new = update_rho(
-        #     rho, rnorm, snorm, iteration=iteration_,
-        #     **(update_rho_options or {}))
-        # # scaled dual variables should be also rescaled
-        # U_0 *= rho / rho_new
-        # U_1 *= rho / rho_new
-        # U_2 *= rho / rho_new
-        # rho = rho_new
+        rho_new = update_rho(
+            rho, rnorm, snorm, iteration=iteration_,
+            **(update_rho_options or {}))
+        # scaled dual variables should be also rescaled
+        U_0 *= rho / rho_new
+        U_1 *= rho / rho_new
+        U_2 *= rho / rho_new
+        rho = rho_new
 
     else:
         warnings.warn("Objective did not converge.")
