@@ -182,6 +182,44 @@ def blockwise_soft_thresholding_symmetric(a, lamda):
 #     end
 # end
 
+def prox_search(loss_function, S, A, A_old, C):
+    from scipy.optimize import minimize_scalar
+
+    def _f(x):
+        return (loss_function(S, (1 - x) * A + x * A_old) - C) ** 2
+        # return loss_function(S, (1 - x) * A + x * A_old) - C + (loss_function(S, (1 - x) * A + x * A_old) - C) ** 2
+
+    out = minimize_scalar(_f, np.array([.5]), bounds=(0., 1.), method='bounded')
+    
+    return out.x, out.fun
+
+
+def prox_grad(loss_function, S, A, C, tol):
+    from scipy.optimize import minimize_scalar
+
+    if loss_function.__name__ == 'neg_logl':
+        grad = S - np.linalg.inv(A)
+    elif loss_function.__name__ == 'dtrace': 
+        grad = (2 * A @ S - I)
+    
+    mask = (np.abs(A) >= tol)
+    np.fill_diagonal(mask, 0)
+
+    def _f(x):
+        return (loss_function(S, A - x * mask * grad) - C) ** 2
+        
+    out = minimize_scalar(_f) # , np.array([.001]), bounds=(0., .01), method='bounded')
+
+    out.main = A - out.x * mask * grad
+    out.loss = loss_function(S, out.main) - C
+    out.alt = A - 1.5 * out.x * mask * grad
+    out.alt_loss = loss_function(S, out.alt) - C
+
+    if out.loss < out.alt_loss:
+        return out.main, out.loss
+    else:
+        return out.alt, out.alt_loss
+
 
 def prox_linf_1d(a, lamda):
     """Proximal operator for the l-inf norm.
@@ -207,14 +245,14 @@ def prox_linf(a, lamda):
 
 
 def prox_logdet_constrained(A, a, I):
-    """Time-varying latent variable graphical lasso prox."""
+    """***Wrong** Negative log-likelihood time-varying latent variable graphical lasso prox."""
     es, Q = np.linalg.eigh(A) 
     xi = (es + np.sqrt(np.square(es) + 4. * a)) / 2. 
     return np.linalg.multi_dot((Q, np.diag(xi), Q.T))
 
 
 def prox_dtrace_constrained(A, S, a, I):
-    """Time-varying latent variable graphical lasso prox."""
+    """***Wrong** DTrace time-varying latent variable graphical lasso prox."""
     return np.linalg.inv(2 * a * S + I) @ (A + a * I)
 
 
@@ -226,7 +264,7 @@ def prox_logdet(a, lamda):
 
 
 def prox_logdet_alt(a, lamda):
-    """Time-varying graphical lasso prox."""
+    """Alternate time-varying graphical lasso prox."""
     es, Q = np.linalg.eigh(a)
     xi = (es + np.sqrt(np.square(es) + 4. * lamda)) / (2. *  lamda)
     return np.linalg.multi_dot((Q, np.diag(xi), Q.T))

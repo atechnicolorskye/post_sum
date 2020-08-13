@@ -86,13 +86,13 @@ def logl(emp_cov, precision):
 def neg_logl(emp_cov, precision):
     """Gaussian log-likelihood without constant term."""
     trace_term = np.sum(emp_cov * precision)
-    return trace_term - fast_logdet(precision), trace_term 
+    return trace_term - fast_logdet(precision) 
 
 
 def dtrace(emp_cov, precision):
     """D Trace Loss."""
     trace_squared_term = np.sum(precision @ precision * emp_cov)
-    return trace_squared_term - np.trace(precision), trace_squared_term
+    return trace_squared_term - np.trace(precision)
 
 
 def weighted_loss(loss, S, K, weights):

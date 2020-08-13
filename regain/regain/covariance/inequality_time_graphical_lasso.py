@@ -34,11 +34,12 @@ https://arxiv.org/abs/1703.01958
 """
 from __future__ import division
 
+from itertools import compress 
+
 import warnings
 
 import numpy as np
 from scipy import linalg
-from scipy.special import lambertw
 from six.moves import map, range, zip
 from sklearn.covariance import empirical_covariance, log_likelihood
 from sklearn.utils.extmath import squared_norm
@@ -47,7 +48,7 @@ from sklearn.utils.validation import check_X_y
 from regain.covariance.graphical_lasso_ import (
     GraphicalLasso, init_precision, neg_logl, dtrace)
 from regain.norm import l1_od_norm
-from regain.prox import prox_logdet_alt, soft_thresholding_od, soft_thresholding_od_alt, prox_logdet
+from regain.prox import soft_thresholding_od, soft_thresholding_od_alt, prox_search, prox_grad
 from regain.update_rules import update_rho
 from regain.utils import convergence, error_norm_time
 from regain.validation import check_norm_prox
@@ -58,7 +59,7 @@ def loss_gen(loss, S, K):
     T, p, _, = S.shape
     losses = np.zeros((T))
     for i in range(T):
-        losses[i], _ = loss(S[i], K[i])
+        losses[i] = loss(S[i], K[i])
     return losses
 
 
@@ -67,24 +68,24 @@ def penalty_objective(Z_0, Z_1, Z_2, psi):
     return sum(map(l1_od_norm, Z_0)) + sum(map(psi, Z_2 - Z_1))
 
 
-def objective(loss, S, K, Z_0, Z_1, Z_2, psi, alpha=1., beta=1.):
-    """Objective function for time-varying graphical LASSO."""
-    obj = sum(loss_gen(loss, S, K))
+# def objective(loss, S, K, Z_0, Z_1, Z_2, psi, alpha=1., beta=1.):
+#     """Objective function for time-varying graphical LASSO."""
+#     obj = sum(loss_gen(loss, S, K))
     
-    if isinstance(alpha, np.ndarray):
-        obj += sum(l1_od_norm(a * z) for a, z in zip(alpha, Z_0))
-    else:
-        obj += alpha * sum(map(l1_od_norm, Z_0))
+#     if isinstance(alpha, np.ndarray):
+#         obj += sum(l1_od_norm(a * z) for a, z in zip(alpha, Z_0))
+#     else:
+#         obj += alpha * sum(map(l1_od_norm, Z_0))
 
-    if isinstance(beta, np.ndarray):
-        obj += sum(b[0][0] * m for b, m in zip(beta, map(psi, Z_2 - Z_1)))
-    else:
-        try:
-            obj += beta * sum(map(psi, Z_2 - Z_1))
-        except TypeError:
-            pass
+#     if isinstance(beta, np.ndarray):
+#         obj += sum(b[0][0] * m for b, m in zip(beta, map(psi, Z_2 - Z_1)))
+#     else:
+#         try:
+#             obj += beta * sum(map(psi, Z_2 - Z_1))
+#         except TypeError:
+#             pass
 
-    return obj
+#     return obj
 
 
 def inequality_time_graphical_lasso(
@@ -154,12 +155,10 @@ def inequality_time_graphical_lasso(
     else:
         loss_function = dtrace
 
-    K = init_precision(S, mode=init)
-    Z_0 = K.copy()
-    Z_1 = K.copy()[:-1] 
-    Z_2 = K.copy()[1:]  
+    Z_0 = K_init # init_precision(S, mode=init)
+    Z_1 = Z_0.copy()[:-1] 
+    Z_2 = Z_0.copy()[1:]  
 
-    U_0 = np.zeros_like(Z_0)
     U_1 = np.zeros_like(Z_1)
     U_2 = np.zeros_like(Z_2)
 
@@ -174,59 +173,102 @@ def inequality_time_graphical_lasso(
     penalty_divisor[0] -= 1
     penalty_divisor[-1] -= 1
 
-    divisor = np.full(S.shape[0], 3, dtype=float)
-    divisor[0] -= 1
-    divisor[-1] -= 1
-
     checks = [
         convergence(
-            obj=objective(
-                loss_function, S, K, Z_0, Z_1, Z_2, psi))
+            obj=penalty_objective(Z_0, Z_1, Z_2, psi))
     ]
 
-    obj_loss = loss_gen(loss_function, S, Z_0)
-
-    # zeros out U_0, U_1, U_2 accordingly when switching between optimisation cycles
-    switch = np.zeros(S.shape[0])
+    switch = 0
 
     for iteration_ in range(max_iter):
         A_K_pen = np.zeros_like(Z_0)
         A_K_pen[:-1] += Z_1 - U_1
         A_K_pen[1:] += Z_2 - U_2
-
-        A_K_obj = Z_0 - U_0 + A_K_pen
-        A_K_obj += A_K_obj.transpose(0, 2, 1)
-        A_K_obj /= 2.
-
         A_K_pen += A_K_pen.transpose(0, 2, 1)
         A_K_pen /= 2.
 
-        for i in range(S.shape[0]):
-            if obj_loss[i] <= C[i]:
-                # update Z_0, don't update K as want convergence to only happen when feasible
-                if i == 0 or i == S.shape[0] - 1:
-                    Z_0[i] = soft_thresholding_od(A_K_pen[i] / penalty_divisor[i], lamda=1. / rho)
-                else:
-                    Z_0[i] = soft_thresholding_od_alt(A_K_pen[i] / penalty_divisor[i], lamda=1. / rho)  
-            else:
-                # update K
-                if loss_function == neg_logl:
-                    A_K_obj[i] *= rho
-                    A_K_obj[i] -= S[i]
-                    K[i] = prox_logdet_alt(A_K_obj[i], lamda= rho * divisor[i])
-                elif loss_function == dtrace:
-                    A_K_obj[i] += I
-                    K[i] = np.linalg.inv(2 * S[i] + 3 * rho) @ A_K_obj[i]
-                # update Z_0
-                A_Z = K[i] + U_0[i]
-                A_Z += A_Z.transpose(1, 0)
-                A_Z /= 2.
-                Z_0[i] = soft_thresholding_od(A_Z, lamda=1. / rho)
-                U_0[i] += K[i] - Z_0[i]
+        Z_0 = soft_thresholding_od_alt(A_K_pen / penalty_divisor[:, None, None], lamda=1. / rho)
 
+        # check feasibility and perform line search if necessary
+        losses_all = loss_gen(loss_function, S, Z_0)
+        if np.inf in losses_all:
+            print('Inf')
+            covariance_ = np.array([linalg.pinvh(x) for x in Z_0_old])
+            return_list = [Z_0_old, covariance_]
+            if return_history:
+                return_list.append(checks)
+            if return_n_iter:
+                return_list.append(iteration_)
+            return return_list
+        feasibility_check = losses_all > C
+        infeasible_indices = list(compress(range(len(feasibility_check)), feasibility_check)) 
+
+        for i in infeasible_indices:
+            # if losses_all[i] == np.inf:
+            #     Z_0_temp, diff_score = prox_search(loss_function, S[i], Z_0[i], Z_0_old[i], C[i])
+            # else:
+            Z_0_temp, diff_score = prox_grad(loss_function, S[i], Z_0[i], C[i], 1e-4)
+            # print(iteration_, i, diff_score)
+            # if iteration_ > 25:
+            #     print(i, diff_score)
+            # if diff_score > 1e-2:
+            #     Z_0[i], _ = prox_search(loss_function, S[i], Z_0[i], Z_0_old[i], C[i])
+            # else:
+            Z_0[i] = Z_0_temp
+            # if i == 0:
+            #     U_1[0] = np.zeros_like(Z_0[i])
+            # elif i == S.shape[0] - 1:
+            #     U_2[-1] = np.zeros_like(Z_0[i])
+            # else:
+            #     U_1[i] = np.zeros_like(Z_0[i])
+            #     U_2[i-1] = np.zeros_like(Z_0[i])
+            # U_1 = np.zeros_like(Z_1)
+            # U_2 = np.zeros_like(Z_2)
+
+        # # update Z_0
+        # Z_0 = soft_thresholding_od_alt(A_K_pen, lamda=1. / rho)
+        # print(loss_gen(loss_function, S, Z_0) > C)
+
+        # # check feasibility and perform line search if necessary
+        # feasibility_check = loss_gen(loss_function, S, Z_0) > C
+        # infeasible_indices = list(compress(range(len(feasibility_check)), feasibility_check)) 
+
+        # scores = []
+        # for i in infeasible_indices:
+        #     # x, n_loss = prox_search(loss_function, S[i], Z_0[i], Z_0_old[i], C[i])
+        #     # # x, n_loss = prox_search(loss_function, S[i], Z_0[i], K_init[i], C[i])
+        #     # if n_loss > 0:
+        #     #     x, _ = prox_search(loss_function, S[i], Z_0[i], K_init[i], C[i])
+        #     #     Z_0[i] = (1 - x) * Z_0[i] + x * K_init[i]
+        #     #     switch = 1
+        #     # else:
+        #     # Z_0[i] = (1 - x) * Z_0[i] + x * Z_0_old[i]
+        #     if switch is 0:
+        #         switch = 1
+        #         U_1 = np.zeros_like(Z_1)
+        #         U_2 = np.zeros_like(Z_2)        
+        #     Z_0[i], score = prox_grad(loss_function, S[i], Z_0[i], C[i])
+        #     Z_0[i] = soft_thresholding_od(Z_0[i], lamda=1. / rho)
+        #     # scores.append(score)
+        #     # if i == 0:
+        #     #     U_1[0] = np.zeros_like(Z_0[i])
+        #     # elif i == S.shape[0] - 1:
+        #     #     U_2[-1] = np.zeros_like(Z_0[i])
+        #     # else:
+        #     #     U_1[i] = np.zeros_like(Z_0[i])
+        #     #     U_2[i-1] = np.zeros_like(Z_0[i])
+        #     # np.fill_diagonal(Z_0[i], np.maximum(np.diagonal(Z_0[i]), 1e-10 * np.ones_like(np.diagonal(Z_0[i]))))
+        # # print(iteration_, len(infeasible_indices), infeasible_indices) # , scores)
+
+            
+        # if switch is 1:
+        #     switch = 0
+        #     U_1 = np.zeros_like(Z_1)
+        #     U_2 = np.zeros_like(Z_2)
+            
         # other Zs
-        A_1 = K[:-1] + U_1
-        A_2 = K[1:] + U_2
+        A_1 = Z_0[:-1] + U_1
+        A_2 = Z_0[1:] + U_2
         if not psi_node_penalty:
             prox_e = prox_psi(A_2 - A_1, lamda=2. / rho)
             Z_1 = .5 * (A_1 + A_2 - prox_e)
@@ -237,72 +279,30 @@ def inequality_time_graphical_lasso(
                 rho=rho, tol=tol, rtol=rtol, max_iter=max_iter)
 
         # update residuals
-        # U_0 += K - Z_0
-        U_1 += K[:-1] - Z_1
-        U_2 += K[1:] - Z_2
+        U_1 += Z_0[:-1] - Z_1
+        U_2 += Z_0[1:] - Z_2
 
         # diagnostics, reporting, termination checks
         rnorm = np.sqrt(
-            squared_norm(K - Z_0) + squared_norm(K[:-1] - Z_1) +
-            squared_norm(K[1:] - Z_2))
+            squared_norm(Z_0[:-1] - Z_1) + squared_norm(Z_0[1:] - Z_2))
         snorm = rho * np.sqrt(
-            squared_norm(Z_0 - Z_0_old) + squared_norm(Z_1 - Z_1_old) +
-            squared_norm(Z_2 - Z_2_old))
+            squared_norm(Z_1 - Z_1_old) + squared_norm(Z_2 - Z_2_old))
 
-        obj_loss = loss_gen(loss_function, S, Z_0)
-
-        # set U[i]s to 0
-        for i in range(S.shape[0]):
-            # if obj_loss[i] < C[i] and switch[i] == 0:
-            #     continue
-            if obj_loss[i] <= C[i] and switch[i] == 1:
-                switch[i] == 0
-            #     # Z_0[i] = K[i]
-            #     U_0[i] = np.zeros_like(Z_0[i])
-            #     if i == 0:
-            #         U_1[i] = np.zeros_like(Z_0[i])
-            #     elif i == S.shape[0] - 1:
-            #         U_2[i-1] = np.zeros_like(Z_0[i])
-            #     else:
-            #         U_1[i] = np.zeros_like(Z_0[i])
-            #         U_2[i-1] = np.zeros_like(Z_0[i])
-                U_0 = np.zeros_like(Z_0)
-                U_1 = np.zeros_like(Z_1)
-                U_2 = np.zeros_like(Z_2)
-            elif obj_loss[i] > C[i] and switch[i] == 0:
-                switch[i] == 1
-                # if i == 0:
-                #     U_1[i] = np.zeros_like(Z_0[i])
-                # elif i == S.shape[0] - 1:
-                #     U_2[i-1] = np.zeros_like(Z_0[i])
-                # else:
-                #     U_1[i] = np.zeros_like(Z_0[i])
-                #     U_2[i-1] = np.zeros_like(Z_0[i])
-                U_0 = np.zeros_like(Z_0)
-                U_1 = np.zeros_like(Z_1)
-                U_2 = np.zeros_like(Z_2)
-            # else:
-            #     continue
-
-        obj = objective(loss_function, S, K, Z_0, Z_1, Z_2, psi)
-
-        # pdb.set_trace()
+        obj = penalty_objective(Z_0, Z_1, Z_2, psi)
+        # print(obj)
 
         check = convergence(
             obj=obj,
             rnorm=rnorm,
             snorm=snorm,
-            e_pri=np.sqrt(K.size + 2 * Z_1.size) * tol + rtol * max(
+            e_pri=np.sqrt(2 * Z_1.size) * tol + rtol * max(
                 np.sqrt(
-                    squared_norm(Z_0) + squared_norm(Z_1) + squared_norm(Z_2)),
+                    squared_norm(Z_1) + squared_norm(Z_2)),
                 np.sqrt(
-                    squared_norm(K) + squared_norm(K[:-1]) +
-                    squared_norm(K[1:]))),
-            e_dual=np.sqrt(K.size + 2 * Z_1.size) * tol + rtol * rho *
-                np.sqrt(squared_norm(U_0) + squared_norm(U_1) + squared_norm(U_2))
+                    squared_norm(Z_0[:-1]) + squared_norm(Z_0[1:]))),
+            e_dual=np.sqrt(2 * Z_1.size) * tol + rtol * rho *
+                np.sqrt(squared_norm(U_1) + squared_norm(U_2))
         )
-
-        # to figure out behaviour and storage of suitable Z_0s
 
         Z_0_old = Z_0.copy()
         Z_1_old = Z_1.copy()
@@ -325,13 +325,17 @@ def inequality_time_graphical_lasso(
             rho, rnorm, snorm, iteration=iteration_,
             **(update_rho_options or {}))
         # scaled dual variables should be also rescaled
-        U_0 *= rho / rho_new
         U_1 *= rho / rho_new
         U_2 *= rho / rho_new
         rho = rho_new
 
+        # print(iteration_, rho)
+        # print(check.rnorm, check.e_pri)
+        # print(check.snorm, check.e_dual)
     else:
         warnings.warn("Objective did not converge.")
+
+    print(iteration_)
 
     covariance_ = np.array([linalg.pinvh(x) for x in Z_0])
     return_list = [Z_0, covariance_]
@@ -562,11 +566,11 @@ class InequalityTimeGraphicalLasso(GraphicalLasso):
             self.emp_cov.append(np.mean(X[:, :, :, i], 2))
             self.emp_inv.append(np.linalg.inv(self.emp_cov[i]))
             if self.loss == 'LL':
-                self.emp_inv_score.append(neg_logl(self.emp_cov[i], self.emp_inv[i])[0])
-                self.sam_inv_score.append(np.array([neg_logl(X[:, :, j, i], self.emp_inv[i])[0] for j in range(n_samples)]))
+                self.emp_inv_score.append(neg_logl(self.emp_cov[i], self.emp_inv[i]))
+                self.sam_inv_score.append(np.array([neg_logl(X[:, :, j, i], self.emp_inv[i]) for j in range(n_samples)]))
             else:
-                self.emp_inv_score.append(dtrace(self.emp_cov[i], self.emp_inv[i])[0])
-                self.sam_inv_score.append(np.array([dtrace(X[:, :, j, i], self.emp_inv[i])[0] for j in range(n_samples)]))
+                self.emp_inv_score.append(dtrace(self.emp_cov[i], self.emp_inv[i]))
+                self.sam_inv_score.append(np.array([dtrace(X[:, :, j, i], self.emp_inv[i]) for j in range(n_samples)]))
             self.C.append(np.quantile(self.sam_inv_score[i], 1 - self.c_level, 0))
 
         self.emp_cov = np.array(self.emp_cov)
@@ -710,8 +714,8 @@ class InequalityTimeGraphicalLasso(GraphicalLasso):
         for i in range(precisions.shape[0]):
             precision = precisions[i]
             if self.loss == 'LL':
-                fit_score.append(neg_logl(self.emp_cov[i], precision)[0])
+                fit_score.append(neg_logl(self.emp_cov[i], precision))
             else:
-                fit_score.append(dtrace(self.emp_cov[i], precision)[0])
+                fit_score.append(dtrace(self.emp_cov[i], precision))
 
         return self.emp_inv_score, self.C, fit_score, precisions 
