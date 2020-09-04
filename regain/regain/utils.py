@@ -104,7 +104,7 @@ def namedtuple_with_defaults(typename, field_names, default_values=()):
 
 
 convergence = namedtuple_with_defaults(
-    'convergence', 'obj rnorm snorm e_pri e_dual precision')
+    'convergence', 'obj out_obj rnorm snorm e_pri e_dual precision')
 
 
 @contextmanager

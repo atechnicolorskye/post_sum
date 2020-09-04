@@ -52,13 +52,25 @@ except:
 
 def soft_thresholding(a, lamda):
     """Soft-thresholding."""
-    return np.sign(a) * np.maximum(np.abs(a) - lamda, 0)
+    return np.sign(a) * np.maximum(np.abs(a) - lamda, 0.)
+
+
+def soft_thresholding_alt(a, lamda, div):
+    """Soft-thresholding."""
+    mask = (np.abs(a) - lamda > 0.)
+    return mask * np.sign(a) * (np.abs(a) - lamda / div)
 
 
 def _soft_thresholding_od_2d(a, lamda):
-    # this assumes array is 2-dimensional
-    # no check is performed for optimisation
+    # Assumes array is 2-dimensional
     soft = soft_thresholding(a, lamda)
+    np.fill_diagonal(soft, np.diag(a))
+    return soft
+
+
+def _soft_thresholding_od_2d_alt(a, lamda, div):
+    # Assumes array is 2-dimensional
+    soft = soft_thresholding_alt(a, lamda, div)
     np.fill_diagonal(soft, np.diag(a))
     return soft
 
@@ -79,17 +91,8 @@ def soft_thresholding_od(a, lamda):
     return out
 
 
-def _soft_thresholding_od_2d_alt(a, lamda):
-    # this assumes array is 2-dimensional
-    # no check is performed for optimisation
-    ones = (np.abs(a) > lamda) * a
-    soft = np.sign(ones) * (np.abs(ones) - 0.5 * lamda )
-    np.fill_diagonal(soft, np.diag(a))
-    return soft
-
-
-def soft_thresholding_od_alt(a, lamda):
-    """Off-diagonal soft-thresholding."""
+def soft_thresholding_od_alt(a, lamda, div):
+    """Penalty-only off-diagonal soft-thresholding."""
     if a.ndim > 2:
         out = np.empty_like(a)
         if not isinstance(lamda, collections.Iterable):
@@ -98,12 +101,9 @@ def soft_thresholding_od_alt(a, lamda):
             assert lamda.shape[0] == a.shape[0]
 
         for t in range(a.shape[0]):
-            if t == 0 or t == a.shape[0] - 1:
-                out[t] = _soft_thresholding_od_2d(a[t], lamda[t])
-            else:
-                out[t] = _soft_thresholding_od_2d_alt(a[t], lamda[t])
+            out[t] = _soft_thresholding_od_2d_alt(a[t], lamda[t], div[t])
     else:
-        out = _soft_thresholding_od_2d_alt(a, lamda)
+        out = _soft_thresholding_od_2d_alt(a, lamda, div)
     return out
 
 
@@ -182,19 +182,39 @@ def blockwise_soft_thresholding_symmetric(a, lamda):
 #     end
 # end
 
-def prox_search(loss_function, S, A, A_old, C):
+def prox_cvx(loss_function, S, A, A_old, C, div):
     from scipy.optimize import minimize_scalar
 
+
     def _f(x):
-        return (loss_function(S, (1 - x) * A + x * A_old) - C) ** 2
-        # return loss_function(S, (1 - x) * A + x * A_old) - C + (loss_function(S, (1 - x) * A + x * A_old) - C) ** 2
+        # return (loss_function(S, (1 - x) * A + x * A_old) - C) ** 2
+        return loss_function(S, (1 - x) * A + x * A_old) - C + (loss_function(S, (1 - x) * A + x * A_old) - C) ** 2
 
     out = minimize_scalar(_f, np.array([.5]), bounds=(0., 1.), method='bounded')
-    
-    return out.x, out.fun
+    # ensures valid convex combination
+    while out.x * div > 1:
+        div -= 0.1
+    out.main = (1 - out.x * div) * A + div * out.x * A_old
+    # out.main = (1 - out.x) * A + out.x * A_old
+
+    return out.main, loss_function(S, out.main) - C
 
 
-def prox_grad(loss_function, S, A, C, tol):
+def prox_diff(loss_function, S, A, A_old, C):
+    from scipy.optimize import minimize_scalar
+
+    grad = A - A_old
+
+    def _f(x):
+        return (loss_function(S, A + x * grad) - C) ** 2
+        
+    out = minimize_scalar(_f)
+    out.main = A + out.x * grad
+
+    return out.main, loss_function(S, out.main) - C
+
+
+def prox_grad(loss_function, S, A, A_old, C, tol):
     from scipy.optimize import minimize_scalar
 
     if loss_function.__name__ == 'neg_logl':
@@ -202,24 +222,30 @@ def prox_grad(loss_function, S, A, C, tol):
     elif loss_function.__name__ == 'dtrace': 
         grad = (2 * A @ S - I)
     
-    mask = (np.abs(A) >= tol)
-    np.fill_diagonal(mask, 0)
+    mask = (np.abs(A) > tol)
+    np.fill_diagonal(mask, 0.)
 
     def _f(x):
-        return (loss_function(S, A - x * mask * grad) - C) ** 2
+        return (loss_function(S, A - x * mask * grad) - C) ** 2 + squared_norm(A - x * mask * grad - A_old)
+        # return (loss_function(S, A - x * mask * grad) - C) ** 2 + (loss_function(S, A - x * mask * grad) - loss_function(S, A)) ** 2
         
-    out = minimize_scalar(_f) # , np.array([.001]), bounds=(0., .01), method='bounded')
+    out = minimize_scalar(_f)
 
-    out.main = A - out.x * mask * grad
-    out.loss = loss_function(S, out.main) - C
-    out.alt = A - 1.5 * out.x * mask * grad
-    out.alt_loss = loss_function(S, out.alt) - C
+    out.grad = out.x * mask * grad
+    candidates = [(A - i * out.grad) for i in [0.5, 1.]]
+    losses = [(loss_function(S, i) - C) for i in candidates]
 
-    if out.loss < out.alt_loss:
-        return out.main, out.loss
-    else:
-        return out.alt, out.alt_loss
+    idx = np.argmin(losses)
+    
+    # def _g(x):
+    #     return (loss_function(S, (1 - x) * candidates[idx] + x * A_old) - C) ** 2
 
+    # out = minimize_scalar(_g, np.array([.5]), bounds=(0., 1.), method='bounded')
+    # A_new = (1 - out.x) * candidates[idx] + out.x * A_old
+
+    # return A_new, loss_function(S, A_new) - C
+
+    return candidates[idx], losses[idx]
 
 def prox_linf_1d(a, lamda):
     """Proximal operator for the l-inf norm.
@@ -245,14 +271,14 @@ def prox_linf(a, lamda):
 
 
 def prox_logdet_constrained(A, a, I):
-    """***Wrong** Negative log-likelihood time-varying latent variable graphical lasso prox."""
+    """**Wrong** Negative log-likelihood time-varying latent variable graphical lasso prox."""
     es, Q = np.linalg.eigh(A) 
     xi = (es + np.sqrt(np.square(es) + 4. * a)) / 2. 
     return np.linalg.multi_dot((Q, np.diag(xi), Q.T))
 
 
 def prox_dtrace_constrained(A, S, a, I):
-    """***Wrong** DTrace time-varying latent variable graphical lasso prox."""
+    """**Wrong** DTrace time-varying latent variable graphical lasso prox."""
     return np.linalg.inv(2 * a * S + I) @ (A + a * I)
 
 
