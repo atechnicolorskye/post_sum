@@ -8,6 +8,7 @@
 
 # Python
 *.pyc
+*.npy
 
 # General
 *.pdf

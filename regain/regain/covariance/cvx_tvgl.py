@@ -71,7 +71,7 @@ def penalty_objective(Z_0, Z_1, Z_2, psi):
 
 
 def cvx_inequality_time_graphical_lasso(
-    S, K_init, max_iter, loss, C, rho, theta, psi, gamma
+    S, K_init, max_iter, loss, C, theta, psi, gamma, tol
     ):
     """Inequality constrained time-varying graphical LASSO solver.
 
@@ -151,17 +151,13 @@ def cvx_inequality_time_graphical_lasso(
     #                     # [(Z_2[t] == K[t+1]) for t in range(T-1)]
 
     prob = cp.Problem(objective, constraints)
-    prob.solve(solver=cp.SCS)
+    prob.solve(solver=cp.SCS, max_iters=np.int(max_iter), eps=tol, verbose=True)
     print(prob.status)
     print(prob.value)
 
     K = np.array([k.value for k in K])
     covariance_ = np.array([linalg.pinvh(k) for k in K])
     return_list = [K, covariance_]
-    if return_history:
-        return_list.append(checks)
-    if return_n_iter:
-        return_list.append(0.)
     return return_list
 
 
@@ -251,6 +247,7 @@ class CVXInequalityTimeGraphicalLasso(GraphicalLasso):
         self.theta = theta
         self.psi = psi
         self.gamma = gamma
+        self.tol = tol
         
 
     def get_observed_precision(self):
@@ -276,11 +273,8 @@ class CVXInequalityTimeGraphicalLasso(GraphicalLasso):
         """
         out = cvx_inequality_time_graphical_lasso(
               emp_cov, self.emp_inv, max_iter=self.max_iter, loss=self.loss, C=self.C, 
-              theta=self.theta, psi=self.psi, gamma=self.gamma)
-        if self.return_history:
-            self.precision_, self.covariance_, self.history_, self.n_iter_ = out
-        else:
-            self.precision_, self.covariance_, self.n_iter_ = out
+              theta=self.theta, psi=self.psi, gamma=self.gamma, tol=self.tol)
+        self.precision_, self.covariance_ = out
         return self
 
 

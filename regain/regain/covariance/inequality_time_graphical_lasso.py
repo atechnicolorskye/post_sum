@@ -48,7 +48,7 @@ from sklearn.utils.validation import check_X_y
 from regain.covariance.graphical_lasso_ import (
     GraphicalLasso, init_precision, neg_logl, dtrace)
 from regain.norm import l1_od_norm
-from regain.prox import soft_thresholding_od_alt, prox_cvx, prox_diff, prox_grad
+from regain.prox import soft_thresholding_od_alt, prox_cvx, prox_grad
 from regain.update_rules import update_rho
 from regain.utils import convergence, error_norm_time
 from regain.validation import check_norm_prox
@@ -69,8 +69,8 @@ def penalty_objective(Z_0, Z_1, Z_2, psi, theta):
 
 
 def inequality_time_graphical_lasso(
-    S, K_init, max_iter, loss, C, theta, rho, div, # n_samples=None, 
-    psi, gamma, tol, rtol, verbose, return_history, 
+    S, K_init, max_iter, loss, C, theta, c_prox,
+    rho, div, psi, gamma, tol, rtol, verbose, return_history, 
     return_n_iter, mode, compute_objective, stop_at, 
     stop_when, update_rho_options, init
     ):
@@ -168,9 +168,25 @@ def inequality_time_graphical_lasso(
         Z_0 = soft_thresholding_od_alt(A_K_pen / divisor[:, None, None], lamda=theta / rho, div=divisor)
 
         # check feasibility and perform line search if necessary
-        losses_all = loss_gen(loss_function, S, Z_0)
-        
-        if np.inf in losses_all:
+        losses_all = loss_gen(loss_function, S, Z_0)        
+        feasibility_check = losses_all > C
+        infeasible_indices = list(compress(range(len(feasibility_check)), feasibility_check)) 
+
+        for i in infeasible_indices:
+            if c_prox == 'cvx':
+                Z_0[i], loss_i = prox_cvx(loss_function, S[i], Z_0[i], Z_0_old[i], C[i], div)
+            elif c_prox == 'grad':
+                if i > 0:
+                    Z_0[i], loss_i = prox_grad(loss_function, S[i], Z_0[i], Z_0_old[i], C[i], 0.) # tol = 1e-4
+                else:
+                    Z_0[i], loss_i = prox_grad(loss_function, S[i], Z_0[i], Z_0_old[i], C[i], 0.)
+
+        # if c_prox == 'cvx' and len(infeasible_indices) > 0:
+        #     rho = rho / 2.
+
+        # break if losses post-correction blow up
+        losses_all_new = loss_gen(loss_function, S, Z_0)   
+        if np.inf in losses_all_new:
             print(iteration_, 'Inf')
             covariance_ = np.array([linalg.pinvh(x) for x in Z_0_old])
             return_list = [Z_0_old, covariance_]
@@ -179,14 +195,7 @@ def inequality_time_graphical_lasso(
             if return_n_iter:
                 return_list.append(iteration_)
             return return_list
-        
-        feasibility_check = losses_all > C
-        infeasible_indices = list(compress(range(len(feasibility_check)), feasibility_check)) 
 
-        for i in infeasible_indices:
-            # Z_0_[i], loss_i = prox_cvx(loss_function, S[i], Z_0[i], Z_0_old[i], C[i], div)
-            Z_0[i], loss_i = prox_grad(loss_function, S[i], Z_0[i], Z_0_old[i], C[i], 0.) # tol = 1e-4
-                    
         # other Zs
         A_1 = Z_0[:-1] + U_1
         A_2 = Z_0[1:] + U_2
@@ -235,8 +244,8 @@ def inequality_time_graphical_lasso(
         out_obj.append(penalty_objective(Z_0, Z_0[:-1], Z_0[1:], psi, theta))
         checks.append(check)
 
-        if len(out_obj) > 10:
-            if (np.mean(out_obj[-11:-1]) - np.mean(out_obj[-10:])) < 1e-3:
+        if len(out_obj) > 10 and c_prox == 'grad':
+            if (np.mean(out_obj[-11:-1]) - np.mean(out_obj[-10:])) < 1e-4:
                 print('obj break')
                 break
 
@@ -249,7 +258,7 @@ def inequality_time_graphical_lasso(
 
         # rho_new = update_rho(
         #     rho, rnorm, snorm, iteration=iteration_,
-        #     mu=100., tau_inc=1.2, tau_dec=1.2)
+        #     mu=1e2, tau_inc=1.01, tau_dec=1.01)
         #     # **(update_rho_options or {}))
         # # scaled dual variables should be also rescaled
         # U_1 *= rho / rho_new
@@ -260,6 +269,7 @@ def inequality_time_graphical_lasso(
         warnings.warn("Objective did not converge.")
 
     print(iteration_, out_obj[-1])
+    # print(out_obj)
     print(check.rnorm, check.e_pri)
     print(check.snorm, check.e_dual)
 
@@ -342,11 +352,11 @@ class InequalityTimeGraphicalLasso(GraphicalLasso):
 
     """
     def __init__(
-            self, max_iter=1000, loss='LL', c_level=None, theta=0.5, rho=1e1, div=2,
-            psi='laplacian', gamma=None, tol=1e-4, rtol=1e-4, mode='admm',   
-            verbose=False, assume_centered=False, return_history=False, 
-            update_rho_options=None, compute_objective=True, 
-            stop_at=None, stop_when=1e-4, suppress_warn_list=False, init='empirical'):
+            self, max_iter=1000, loss='LL', c_level=None, theta=0.5, c_prox=None,
+            rho=1e2, div=2, psi='laplacian', gamma=None, tol=1e-4, rtol=1e-4, 
+            mode='admm', verbose=False, assume_centered=False, return_history=False, 
+            update_rho_options=None, compute_objective=True, stop_at=None, 
+            stop_when=1e-4, suppress_warn_list=False, init='empirical'):
         super().__init__(
             alpha=1., rho=rho, tol=tol, rtol=rtol, max_iter=max_iter,
             verbose=verbose, assume_centered=assume_centered, mode=mode,
@@ -356,6 +366,7 @@ class InequalityTimeGraphicalLasso(GraphicalLasso):
         self.loss = loss
         self.c_level = c_level
         self.theta = theta
+        self.c_prox = c_prox
         self.rho = rho
         self.div = div
         self.psi = psi
@@ -388,8 +399,8 @@ class InequalityTimeGraphicalLasso(GraphicalLasso):
 
         """
         out = inequality_time_graphical_lasso(
-              emp_cov, self.emp_inv, max_iter=self.max_iter, loss=self.loss, C=self.C, theta=self.theta,
-              rho=self.rho, div=self.div, # n_samples=self.n_samples, 
+              emp_cov, self.emp_inv, max_iter=self.max_iter, loss=self.loss, C=self.C, 
+              c_prox=self.c_prox, theta=self.theta, rho=self.rho, div=self.div, # n_samples=self.n_samples, 
               psi=self.psi, gamma=self.gamma, tol=self.tol, rtol=self.rtol, 
               verbose=self.verbose, return_history=self.return_history, return_n_iter=True,  
               mode=self.mode, compute_objective=self.compute_objective, stop_at=self.stop_at,

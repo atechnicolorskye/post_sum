@@ -47,7 +47,7 @@ from sklearn.utils.validation import check_X_y
 from regain.covariance.graphical_lasso_ import (
     GraphicalLasso, init_precision, logl)
 from regain.norm import l1_od_norm
-from regain.prox import prox_logdet, soft_thresholding, soft_thresholding_od
+from regain.prox import prox_logdet, prox_logdet_alt, soft_thresholding_od
 from regain.update_rules import update_rho
 from regain.utils import convergence, error_norm_time
 from regain.validation import check_norm_prox
@@ -86,17 +86,17 @@ def objective(n_samples, S, K, Z_0, Z_1, Z_2, alpha, beta, psi):
 
 def time_graphical_lasso(
         emp_cov, alpha=0.01, rho=1, beta=1, max_iter=100, n_samples=None,
-        verbose=False, psi='laplacian', gamma=None, constrained_to=None,
-        tol=1e-4, rtol=1e-4, return_history=False, return_n_iter=True, 
-        mode='admm', compute_objective=True, stop_at=None, stop_when=1e-4,
+        verbose=False, psi='laplacian', tol=1e-4, rtol=1e-4,
+        return_history=False, return_n_iter=True, mode='admm',
+        compute_objective=True, stop_at=None, stop_when=1e-4,
         update_rho_options=None, init='empirical'):
-    """Time-varying graphical LASSO solver.
+    """Time-varying graphical lasso solver.
 
     Solves the following problem via ADMM:
         min sum_{i=1}^T -n_i log_likelihood(S_i, K_i) + alpha*||K_i||_{od,1}
             + beta sum_{i=2}^T Psi(K_i - K_{i-1})
 
-    where S_i = (1/n_i) X_i^T X_i is the empirical covariance of data
+    where S_i = (1/n_i) X_i^T \times X_i is the empirical covariance of data
     matrix X (training observations by features).
 
     Parameters
@@ -111,8 +111,6 @@ def time_graphical_lasso(
         Maximum number of iterations.
     n_samples : ndarray
         Number of samples available for each time point.
-    gamma: float, optional
-        Kernel parameter when psi is chosen to be 'kernel'.
     tol : float, optional
         Absolute tolerance for convergence.
     rtol : float, optional
@@ -144,49 +142,22 @@ def time_graphical_lasso(
     """
     psi, prox_psi, psi_node_penalty = check_norm_prox(psi)
 
-    psi_name = psi.__name__
-
-    if 'kernel' in psi_name:
-        weights = np.zeros((emp_cov.shape[0], emp_cov.shape[0]))
-        for i in range(1, emp_cov.shape[0]):
-            weights += np.eye(emp_cov.shape[0], k=i) * np.exp(-gamma * i ** 2) 
-        weights = weights + weights.T
-        emp_cov_reg = beta / emp_cov.shape[0] * np.einsum('kl, lij -> kij', weights, emp_cov)
-        beta = 0
-    # else:
-    #     weights = None
-
     Z_0 = init_precision(emp_cov, mode=init)
-    if 'kernel' in psi_name:
-        Z_1 = 0.
-        Z_2 = 0.    
-    else:
-        Z_1 = Z_0.copy()[:-1]  # np.zeros_like(emp_cov)[:-1]
-        Z_2 = Z_0.copy()[1:]  # np.zeros_like(emp_cov)[1:]
+    Z_1 = Z_0.copy()[:-1]  # np.zeros_like(emp_cov)[:-1]
+    Z_2 = Z_0.copy()[1:]  # np.zeros_like(emp_cov)[1:]
 
     U_0 = np.zeros_like(Z_0)
-    if 'kernel' in psi_name:
-        U_1 = 0.
-        U_2 = 0.
-    else:
-        U_1 = np.zeros_like(Z_1)
-        U_2 = np.zeros_like(Z_2)
+    U_1 = np.zeros_like(Z_1)
+    U_2 = np.zeros_like(Z_2)
 
     Z_0_old = np.zeros_like(Z_0)
-    if 'kernel' in psi_name:
-        Z_1_old = 0.
-        Z_2_old = 0.
-    else:
-        Z_1_old = np.zeros_like(Z_1)
-        Z_2_old = np.zeros_like(Z_2)
+    Z_1_old = np.zeros_like(Z_1)
+    Z_2_old = np.zeros_like(Z_2)
 
-    # divisor for consensus variables, accounting for two less matrices for t = 0 and t = T
-    if 'kernel' in psi_name:
-        divisor = np.full(emp_cov.shape[0], 1, dtype=float)
-    else:
-        divisor = np.full(emp_cov.shape[0], 3, dtype=float)
-        divisor[0] -= 1
-        divisor[-1] -= 1
+    # divisor for consensus variables, accounting for two less matrices
+    divisor = np.full(emp_cov.shape[0], 3, dtype=float)
+    divisor[0] -= 1
+    divisor[-1] -= 1
 
     if n_samples is None:
         n_samples = np.ones(emp_cov.shape[0])
@@ -196,27 +167,20 @@ def time_graphical_lasso(
             obj=objective(
                 n_samples, emp_cov, Z_0, Z_0, Z_1, Z_2, alpha, beta, psi))
     ]
-
     for iteration_ in range(max_iter):
         # update K
         A = Z_0 - U_0
-        if 'kernel' not in psi_name:
-            A[:-1] += Z_1 - U_1
-            A[1:] += Z_2 - U_2
-        A /= divisor[:, None, None]
-        # soft_thresholding_ = partial(soft_thresholding, lamda=alpha / rho)
-        # K = np.array(map(soft_thresholding_, A))
+        A[:-1] += Z_1 - U_1
+        A[1:] += Z_2 - U_2
         A += A.transpose(0, 2, 1)
         A /= 2.
 
-        A *= -rho * divisor[:, None, None] # / n_samples[:, None, None]
-        A += emp_cov # + emp_cov_reg
+        A *= -rho / n_samples[:, None, None]
+        A += emp_cov
 
         K = np.array(
             [
-                # prox_logdet(a, lamda=ni / (rho * div))
-                # for a, div, ni in zip(A, divisor, n_samples)
-                prox_logdet(a, lamda=1 / (rho * div))
+                prox_logdet_alt(a, lamda=rho * div)
                 for a, div in zip(A, divisor)
             ])
 
@@ -227,79 +191,52 @@ def time_graphical_lasso(
         Z_0 = soft_thresholding_od(A, lamda=alpha / rho)
 
         # other Zs
-        if 'kernel' not in psi_name:
-            A_1 = K[:-1] + U_1
-            A_2 = K[1:] + U_2
-            if not psi_node_penalty:
-                prox_e = prox_psi(A_2 - A_1, lamda=2. * beta / rho)
-                Z_1 = .5 * (A_1 + A_2 - prox_e)
-                Z_2 = .5 * (A_1 + A_2 + prox_e)
-            else:
-                Z_1, Z_2 = prox_psi(
-                    np.concatenate((A_1, A_2), axis=1), lamda=.5 * beta / rho,
-                    rho=rho, tol=tol, rtol=rtol, max_iter=max_iter)
+        A_1 = K[:-1] + U_1
+        A_2 = K[1:] + U_2
+        if not psi_node_penalty:
+            prox_e = prox_psi(A_2 - A_1, lamda=2. * beta / rho)
+            Z_1 = .5 * (A_1 + A_2 - prox_e)
+            Z_2 = .5 * (A_1 + A_2 + prox_e)
+        else:
+            Z_1, Z_2 = prox_psi(
+                np.concatenate((A_1, A_2), axis=1), lamda=.5 * beta / rho,
+                rho=rho, tol=tol, rtol=rtol, max_iter=max_iter)
 
         # update residuals
         U_0 += K - Z_0
-        if 'kernel' not in psi_name:
-            U_1 += K[:-1] - Z_1
-            U_2 += K[1:] - Z_2
+        U_1 += K[:-1] - Z_1
+        U_2 += K[1:] - Z_2
 
         # diagnostics, reporting, termination checks
-        if 'kernel' in psi_name:
-            rnorm = np.sqrt(squared_norm(K - Z_0))
-            snorm = rho * np.sqrt( squared_norm(Z_0 - Z_0_old))
-        else:
-            rnorm = np.sqrt(
-                squared_norm(K - Z_0) + squared_norm(K[:-1] - Z_1) +
-                squared_norm(K[1:] - Z_2))
-            snorm = rho * np.sqrt(
-                squared_norm(Z_0 - Z_0_old) + squared_norm(Z_1 - Z_1_old) +
-                squared_norm(Z_2 - Z_2_old))
+        rnorm = np.sqrt(
+            squared_norm(K - Z_0) + squared_norm(K[:-1] - Z_1) +
+            squared_norm(K[1:] - Z_2))
 
-        if 'kernel' in psi_name:
-            obj = objective(
-                n_samples, emp_cov + emp_cov_reg, Z_0, K, Z_1, Z_2, alpha, beta, psi) \
-                if compute_objective else np.nan
-        else:
-            obj = objective(
-                n_samples, emp_cov, Z_0, K, Z_1, Z_2, alpha, beta, psi) \
-                if compute_objective else np.nan
+        snorm = rho * np.sqrt(
+            squared_norm(Z_0 - Z_0_old) + squared_norm(Z_1 - Z_1_old) +
+            squared_norm(Z_2 - Z_2_old))
 
-        if 'kernel' in psi_name:
-            check = convergence(
-                obj=obj,
-                rnorm=rnorm,
-                snorm=snorm,
-                e_pri=np.sqrt(K.size) * tol + rtol * max(
-                    np.sqrt(
-                        squared_norm(Z_0)),
-                    np.sqrt(
-                        squared_norm(K))),
-                e_dual=np.sqrt(K.size) * tol + rtol * rho *
-                    np.sqrt(squared_norm(U_0)),
-            )
-        else:
-            check = convergence(
-                obj=obj,
-                rnorm=rnorm,
-                snorm=snorm,
-                e_pri=np.sqrt(K.size + 2 * Z_1.size) * tol + rtol * max(
-                    np.sqrt(
-                        squared_norm(Z_0) + squared_norm(Z_1) + squared_norm(Z_2)),
-                    np.sqrt(
-                        squared_norm(K) + squared_norm(K[:-1]) +
-                        squared_norm(K[1:]))),
-                e_dual=np.sqrt(K.size + 2 * Z_1.size) * tol + rtol * rho *
-                    np.sqrt(squared_norm(U_0) + squared_norm(U_1) + squared_norm(U_2)),
-                # precision=Z_0.copy()
-            )
+        obj = objective(
+            n_samples, emp_cov, Z_0, K, Z_1, Z_2, alpha, beta, psi) \
+            if compute_objective else np.nan
 
-
+        check = convergence(
+            obj=obj,
+            rnorm=rnorm,
+            snorm=snorm,
+            e_pri=np.sqrt(K.size + 2 * Z_1.size) * tol + rtol * max(
+                np.sqrt(
+                    squared_norm(Z_0) + squared_norm(Z_1) + squared_norm(Z_2)),
+                np.sqrt(
+                    squared_norm(K) + squared_norm(K[:-1]) +
+                    squared_norm(K[1:]))),
+            e_dual=np.sqrt(K.size + 2 * Z_1.size) * tol + rtol * rho *
+            np.sqrt(squared_norm(U_0) + squared_norm(U_1) + squared_norm(U_2)),
+            # precision=Z_0.copy()
+        )
         Z_0_old = Z_0.copy()
-        if 'kernel' not in psi_name:
-            Z_1_old = Z_1.copy()
-            Z_2_old = Z_2.copy()
+        Z_1_old = Z_1.copy()
+        Z_2_old = Z_2.copy()
 
         if verbose:
             print(
@@ -319,11 +256,11 @@ def time_graphical_lasso(
             **(update_rho_options or {}))
         # scaled dual variables should be also rescaled
         U_0 *= rho / rho_new
-        if 'kernel' not in psi_name:
-            U_1 *= rho / rho_new
-            U_2 *= rho / rho_new
+        U_1 *= rho / rho_new
+        U_2 *= rho / rho_new
         rho = rho_new
 
+        #assert is_pos_def(Z_0)
     else:
         warnings.warn("Objective did not converge.")
 
@@ -407,8 +344,7 @@ class TimeGraphicalLasso(GraphicalLasso):
     """
     def __init__(
             self, alpha=0.01, beta=1., mode='admm', rho=1., tol=1e-4,
-            rtol=1e-4, psi='laplacian', gamma=None, constrained_to=None, 
-            max_iter=100, verbose=False, assume_centered=False, 
+            rtol=1e-4, psi='laplacian', max_iter=100, verbose=False, assume_centered=False, 
             return_history=False, update_rho_options=None, compute_objective=True, 
             stop_at=None, stop_when=1e-4, suppress_warn_list=False, init='empirical'):
         super().__init__(
@@ -418,8 +354,6 @@ class TimeGraphicalLasso(GraphicalLasso):
             compute_objective=compute_objective, init=init)
         self.beta = beta
         self.psi = psi
-        self.gamma = gamma
-        self.constrained_to = constrained_to
         self.return_history = return_history
         self.stop_at = stop_at
         self.stop_when = stop_when
@@ -449,8 +383,7 @@ class TimeGraphicalLasso(GraphicalLasso):
         out = time_graphical_lasso(
             emp_cov, alpha=self.alpha, rho=self.rho, beta=self.beta,
             mode=self.mode, n_samples=n_samples, tol=self.tol, rtol=self.rtol,
-            psi=self.psi, max_iter=self.max_iter, gamma=self.gamma,
-            constrained_to=self.constrained_to, verbose=self.verbose, 
+            psi=self.psi, max_iter=self.max_iter, verbose=self.verbose, 
             return_n_iter=True, return_history=self.return_history,
             update_rho_options=self.update_rho_options,
             compute_objective=self.compute_objective, stop_at=self.stop_at,
@@ -538,7 +471,8 @@ class TimeGraphicalLasso(GraphicalLasso):
 
         self.constrained_to = np.quantile(self.sam_inv_score, 0.5, 1)
 
-        return self._fit(np.array(self.emp_cov), np.ones(time_steps) * n_samples)
+        # return self._fit(np.array(self.emp_cov), np.ones(time_steps) * n_samples)
+        return self._fit(np.array(self.emp_cov), np.ones(time_steps))
 
     def score(self, X, y):
         """Computes the log-likelihood of a Gaussian data set with
