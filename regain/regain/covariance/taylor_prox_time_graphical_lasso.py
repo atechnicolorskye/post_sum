@@ -45,12 +45,10 @@ from sklearn.covariance import empirical_covariance, log_likelihood
 from sklearn.utils.extmath import squared_norm
 from sklearn.utils.validation import check_X_y
 
-import cvxpy as cp
-
 from regain.covariance.graphical_lasso_ import (
     GraphicalLasso, init_precision, neg_logl, dtrace)
 from regain.norm import l1_od_norm
-from regain.prox import soft_thresholding_od, soft_thresholding_od_alt
+from regain.prox import soft_thresholding_od_alt
 from regain.update_rules import update_rho
 from regain.utils import convergence, error_norm_time
 from regain.validation import check_norm_prox
@@ -59,19 +57,20 @@ import pdb
 
 def loss_gen(loss, S, K):
     T, p, _, = S.shape
-    losses = np.zeros((T))
-    for i in range(T):
-        losses[i] = loss(S[i],  K[i])
+    losses = np.array([loss(S[i], K[i]) for i in range(T)])
     return losses
 
 
-def penalty_objective(Z_0, Z_1, Z_2, psi):
+def penalty_objective(Z_0, Z_1, Z_2, psi, theta):
     """Penalty-only objective function for time-varying graphical LASSO."""
-    return sum(map(l1_od_norm, Z_0)) + sum(map(psi, Z_2 - Z_1))
+    return theta * sum(map(l1_od_norm, Z_0)) + (1 - theta) * sum(map(psi, Z_2 - Z_1))
 
 
-def cvx_inequality_time_graphical_lasso(
-    S, K_init, max_iter, loss, C, theta, psi, gamma, tol
+def taylor_prox_time_graphical_lasso(
+    S, K_init, max_iter, loss, C, theta,
+    rho, div, psi, gamma, tol, rtol, verbose, return_history, 
+    return_n_iter, mode, compute_objective, stop_at, 
+    stop_when, update_rho_options, init
     ):
     """Inequality constrained time-varying graphical LASSO solver.
 
@@ -127,43 +126,146 @@ def cvx_inequality_time_graphical_lasso(
     """
     psi, prox_psi, psi_node_penalty = check_norm_prox(psi)
 
+    psi_name = psi.__name__
+
     if loss == 'LL':
         loss_function = neg_logl
     else:
         loss_function = dtrace
 
-    T, p, _ = S.shape
-    K = [cp.Variable(shape=(p, p), PSD=True) for t in range(T)]
-    # Z_1 = [cp.Variable(shape=(p, p), PSD=True) for t in range(T-1)]
-    # Z_2 = [cp.Variable(shape=(p, p), PSD=True) for t in range(T-1)]
+    Z_0 = K_init # init_precision(S, mode=init)
+    Z_1 = Z_0.copy()[:-1] 
+    Z_2 = Z_0.copy()[1:]  
 
-    objective = cp.Minimize(theta * cp.sum([cp.norm(K[t] - cp.diag(cp.diag(K[t])), 1) for t in range(T)]) + 
-                            (1 - theta) * cp.sum([cp.norm(K[t] - K[t-1], 'fro') for t in range(1, T)]))
+    u_0 = np.zeros(S.shape[0])
+    U_1 = np.zeros_like(Z_1)
+    U_2 = np.zeros_like(Z_2)
 
-    # if loss_function == neg_logl:
-    constraints = [(cp.sum(cp.multiply(K[t], S[t])) - cp.log_det(K[t]) <= C[t]) for t in range(T)]
-                    # [(cp.trace(K[t] @ S[t]) - cp.log_det(K[t]) <= C[t]) for t in range(T)] # + \
-                    # [(Z_1[t] == K[t]) for t in range(T-1)] + \
-                    # [(Z_2[t] == K[t+1]) for t in range(T-1)]
-    # else:
-    #     constraints = [(cp.trace(K[t] @ K[t] @ S[t]) - cp.trace(K[t]) <= C[t]) for t in range(T)] # + \
-    #                     # [(Z_1[t] == K[t]) for t in range(T-1)] + \
-    #                     # [(Z_2[t] == K[t+1]) for t in range(T-1)]
+    Z_0_old = Z_0.copy()
+    Z_1_old = np.zeros_like(Z_1)
+    Z_2_old = np.zeros_like(Z_2)
 
-    prob = cp.Problem(objective, constraints)
-    # prob.solve(solver=cp.SCS, max_iters=np.int(max_iter), eps=tol, verbose=True)
-    prob.solve(solver=cp.MOSEK)
+    # divisor for consensus variables, accounting for one less matrix for t = 0 and t = T
+    divisor = np.full(S.shape[0], 3, dtype=float)
+    divisor[0] -= 1
+    divisor[-1] -= 1
 
-    print(prob.status)
-    print(prob.value)
+    out_obj = []
 
-    K = np.array([k.value for k in K])
-    covariance_ = np.array([linalg.pinvh(k) for k in K])
-    return_list = [K, covariance_]
+    checks = [
+        convergence(
+            obj=penalty_objective(Z_0, Z_1, Z_2, psi, theta))
+    ]
+
+    for iteration_ in range(max_iter):
+        if iteration_ == 0:
+            nabla_mult = np.zeros(S.shape[0])
+            nabla_A = np.zeros_like(Z_0)
+        else:
+            if loss_function.__name__ == 'neg_logl':
+                nabla_A = np.array([S_t - np.linalg.inv(A_t) for (A_t, S_t) in zip(Z_0_old, S)])
+            elif loss_function.__name__ == 'dtrace': 
+                nabla_A = np.array([(2 * A_t @ S_t - I) for (A_t, S_t) in zip(Z_0_old, S)])
+            nabla_mult = -loss_gen(loss_function, S, Z_0_old) - 1 + C - u_0
+            nabla_mult += np.array([np.sum(nabla_A_t * A_t) for (nabla_A_t, A_t) in zip(nabla_A, Z_0_old)]) 
+
+        A_K_pen = Z_0_old + 1e-4 * nabla_mult[:, None, None] * nabla_A
+        A_K_pen[:-1] += Z_1 - U_1
+        A_K_pen[1:] += Z_2 - U_2
+        A_K_pen += A_K_pen.transpose(0, 2, 1)
+        A_K_pen /= 2.
+
+        Z_0 = soft_thresholding_od_alt(A_K_pen / divisor[:, None, None], lamda=theta / rho, div=divisor)
+
+        # other Zs
+        A_1 = Z_0[:-1] + U_1
+        A_2 = Z_0[1:] + U_2
+        if not psi_node_penalty:
+            prox_e = prox_psi(A_2 - A_1, lamda=2. * (1- theta) / rho)
+            Z_1 = .5 * (A_1 + A_2 - prox_e)
+            Z_2 = .5 * (A_1 + A_2 + prox_e)
+        else:
+            Z_1, Z_2 = prox_psi(
+                np.concatenate((A_1, A_2), axis=1), lamda=.5 * (1- theta) / rho,
+                rho=rho, tol=tol, rtol=rtol, max_iter=max_iter)
+
+        # update residuals
+        res = loss_gen(loss_function, S, Z_0) - C
+        u_0 += res
+        U_1 += Z_0[:-1] - Z_1
+        U_2 += Z_0[1:] - Z_2
+
+        # diagnostics, reporting, termination checks
+        rnorm = np.sqrt(squared_norm(Z_0[:-1] - Z_1) + squared_norm(Z_0[1:] - Z_2))
+        snorm = np.sqrt(squared_norm(Z_1 - Z_1_old) + squared_norm(Z_2 - Z_2_old))
+
+        obj = penalty_objective(Z_0, Z_1, Z_2, psi, theta)
+
+        check = convergence(
+            obj=obj,
+            rnorm=rnorm,
+            snorm=snorm,
+            e_pri=np.sqrt(2 * Z_1.size) * tol + rtol * max(
+                np.sqrt(
+                    squared_norm(Z_1) + squared_norm(Z_2)),
+                np.sqrt(
+                    squared_norm(Z_0[:-1]) + squared_norm(Z_0[1:]))),
+            e_dual=np.sqrt(2 * Z_1.size) * tol + rtol * rho *
+                np.sqrt(squared_norm(U_1) + squared_norm(U_2))
+        )
+
+        Z_0_old = Z_0.copy()
+        Z_1_old = Z_1.copy()
+        Z_2_old = Z_2.copy()
+
+        if verbose:
+            print(
+                "obj: %.4f, rnorm: %.4f, snorm: %.4f,"
+                "eps_pri: %.4f, eps_dual: %.4f" % check[:5])
+
+        out_obj.append(penalty_objective(Z_0, Z_0[:-1], Z_0[1:], psi, theta))
+        # print(out_obj)
+        checks.append(check)
+
+        # if len(out_obj) > 10 and c_prox == 'grad':
+        #     if (np.mean(out_obj[-11:-1]) - np.mean(out_obj[-10:])) < 1e-4:
+        #         print('obj break')
+        #         break
+
+        if stop_at is not None:
+            if abs(check.obj - stop_at) / abs(stop_at) < stop_when:
+                break
+
+        if check.rnorm <= check.e_pri and check.snorm <= check.e_dual:
+            break
+
+        # rho_new = update_rho(
+        #     rho, rnorm, snorm, iteration=iteration_,
+        #     mu=1e2, tau_inc=1.01, tau_dec=1.01)
+        #     # **(update_rho_options or {}))
+        # # scaled dual variables should be also rescaled
+        # U_1 *= rho / rho_new
+        # U_2 *= rho / rho_new
+        # rho = rho_new
+
+    else:
+        warnings.warn("Objective did not converge.")
+
+    print(iteration_, out_obj[-1])
+    # print(out_obj)
+    print(check.rnorm, check.e_pri)
+    print(check.snorm, check.e_dual)
+
+    covariance_ = np.array([linalg.pinvh(x) for x in Z_0])
+    return_list = [Z_0, covariance_]
+    if return_history:
+        return_list.append(checks)
+    if return_n_iter:
+        return_list.append(iteration_ + 1)
     return return_list
 
 
-class CVXInequalityTimeGraphicalLasso(GraphicalLasso):
+class TaylorProxTimeGraphicalLasso(GraphicalLasso):
     """Sparse inverse covariance estimation with an l1-penalized estimator.
 
     Parameters
@@ -233,11 +335,11 @@ class CVXInequalityTimeGraphicalLasso(GraphicalLasso):
 
     """
     def __init__(
-            self, max_iter=1000, loss='LL', c_level=None, theta=0.5, rho=1e1,
-            psi='laplacian', gamma=None, tol=1e-4, rtol=1e-4, mode='admm',   
-            verbose=False, assume_centered=False, return_history=False, 
-            update_rho_options=None, compute_objective=True, 
-            stop_at=None, stop_when=1e-4, suppress_warn_list=False, init='empirical'):
+            self, max_iter=1000, loss='LL', c_level=None, theta=0.5,
+            rho=1e2, div=2, psi='laplacian', gamma=None, tol=1e-4, rtol=1e-4, 
+            mode='admm', verbose=False, assume_centered=False, return_history=False, 
+            update_rho_options=None, compute_objective=True, stop_at=None, 
+            stop_when=1e-4, suppress_warn_list=False, init='empirical'):
         super().__init__(
             alpha=1., rho=rho, tol=tol, rtol=rtol, max_iter=max_iter,
             verbose=verbose, assume_centered=assume_centered, mode=mode,
@@ -247,10 +349,15 @@ class CVXInequalityTimeGraphicalLasso(GraphicalLasso):
         self.loss = loss
         self.c_level = c_level
         self.theta = theta
+        self.rho = rho
+        self.div = div
         self.psi = psi
         self.gamma = gamma
-        self.tol = tol
-        
+        self.return_history = return_history
+        self.stop_at = stop_at
+        self.stop_when = stop_when
+        self.suppress_warn_list = suppress_warn_list
+
 
     def get_observed_precision(self):
         """Getter for the observed precision matrix.
@@ -273,10 +380,17 @@ class CVXInequalityTimeGraphicalLasso(GraphicalLasso):
             Empirical covariance of data.
 
         """
-        out = cvx_inequality_time_graphical_lasso(
+        out = taylor_prox_time_graphical_lasso(
               emp_cov, self.emp_inv, max_iter=self.max_iter, loss=self.loss, C=self.C, 
-              theta=self.theta, psi=self.psi, gamma=self.gamma, tol=self.tol)
-        self.precision_, self.covariance_ = out
+              theta=self.theta, rho=self.rho, div=self.div, # n_samples=self.n_samples, 
+              psi=self.psi, gamma=self.gamma, tol=self.tol, rtol=self.rtol, 
+              verbose=self.verbose, return_history=self.return_history, return_n_iter=True,  
+              mode=self.mode, compute_objective=self.compute_objective, stop_at=self.stop_at,
+              stop_when=self.stop_when, update_rho_options=self.update_rho_options, init=self.init)
+        if self.return_history:
+            self.precision_, self.covariance_, self.history_, self.n_iter_ = out
+        else:
+            self.precision_, self.covariance_, self.n_iter_ = out
         return self
 
 
@@ -312,6 +426,7 @@ class CVXInequalityTimeGraphicalLasso(GraphicalLasso):
         emp_inv_score = []
         sam_inv_score = []
 
+    
         for i in self.classes_:
             emp_cov_i = empirical_covariance(X[y == i], assume_centered=self.assume_centered)
             emp_inv_i = np.linalg.inv(emp_cov_i)
