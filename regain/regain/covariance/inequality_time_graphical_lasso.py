@@ -48,7 +48,7 @@ from sklearn.utils.validation import check_X_y
 from regain.covariance.graphical_lasso_ import (
     GraphicalLasso, init_precision, neg_logl, dtrace)
 from regain.norm import l1_od_norm
-from regain.prox import soft_thresholding_od_alt, prox_cvx, prox_grad
+from regain.prox import soft_thresholding_od, prox_cvx, prox_grad
 from regain.update_rules import update_rho
 from regain.utils import convergence, error_norm_time
 from regain.validation import check_norm_prox
@@ -165,7 +165,7 @@ def inequality_time_graphical_lasso(
         A_K_pen += A_K_pen.transpose(0, 2, 1)
         A_K_pen /= 2.
 
-        Z_0 = soft_thresholding_od_alt(A_K_pen / divisor[:, None, None], lamda=theta / rho, div=divisor)
+        Z_0 = soft_thresholding_od(A_K_pen / divisor[:, None, None], lamda=theta / (rho * divisor))
 
         # check feasibility and perform line search if necessary
         losses_all = loss_gen(loss_function, S, Z_0)        

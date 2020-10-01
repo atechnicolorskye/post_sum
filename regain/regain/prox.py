@@ -35,6 +35,7 @@ from functools import partial
 import collections
 
 import numpy as np
+from scipy.optimize import minimize_scalar
 from six.moves import range, zip
 from sklearn.utils.extmath import squared_norm
 
@@ -55,23 +56,9 @@ def soft_thresholding(a, lamda):
     return np.sign(a) * np.maximum(np.abs(a) - lamda, 0.)
 
 
-def soft_thresholding_alt(a, lamda, div):
-    """Soft-thresholding."""
-    # mask = (np.abs(a) - lamda > 0.)
-    return np.sign(a) * np.maximum(np.abs(a) - lamda / div, 0.)
-    # return mask * np.sign(a) * (np.abs(a) - lamda / div)
-
-
 def _soft_thresholding_od_2d(a, lamda):
     # Assumes array is 2-dimensional
     soft = soft_thresholding(a, lamda)
-    np.fill_diagonal(soft, np.diag(a))
-    return soft
-
-
-def _soft_thresholding_od_2d_alt(a, lamda, div):
-    # Assumes array is 2-dimensional
-    soft = soft_thresholding_alt(a, lamda, div)
     np.fill_diagonal(soft, np.diag(a))
     return soft
 
@@ -89,22 +76,6 @@ def soft_thresholding_od(a, lamda):
             out[t] = _soft_thresholding_od_2d(a[t], lamda[t])
     else:
         out = _soft_thresholding_od_2d(a, lamda)
-    return out
-
-
-def soft_thresholding_od_alt(a, lamda, div):
-    """Penalty-only off-diagonal soft-thresholding."""
-    if a.ndim > 2:
-        out = np.empty_like(a)
-        if not isinstance(lamda, collections.Iterable):
-            lamda = np.repeat(lamda, a.shape[0])
-        else:
-            assert lamda.shape[0] == a.shape[0]
-
-        for t in range(a.shape[0]):
-            out[t] = _soft_thresholding_od_2d_alt(a[t], lamda[t], div[t])
-    else:
-        out = _soft_thresholding_od_2d_alt(a, lamda, div)
     return out
 
 
@@ -185,8 +156,6 @@ def blockwise_soft_thresholding_symmetric(a, lamda):
 
 
 def prox_cvx(loss_function, S, A, A_old, C, div):
-    from scipy.optimize import minimize_scalar
-
     def _f(x):
         return (loss_function(S, x * A + (1 - x) * A_old) - C) ** 2
         # return loss_function(S, x * A + (1 - x) * A_old) - C + (loss_function(S, x * A + (1 - x) * A_old) - C) ** 2
@@ -200,8 +169,6 @@ def prox_cvx(loss_function, S, A, A_old, C, div):
 
 
 def prox_grad(loss_function, S, A, A_old, C, tol):
-    from scipy.optimize import minimize_scalar
-
     if loss_function.__name__ == 'neg_logl':
         grad = S - np.linalg.inv(A)
     elif loss_function.__name__ == 'dtrace': 
@@ -223,15 +190,28 @@ def prox_grad(loss_function, S, A, A_old, C, tol):
 
     idx = np.argmin(losses)
     
-    # def _g(x):
-    #     return (loss_function(S, (1 - x) * candidates[idx] + x * A_old) - C) ** 2
-
-    # out = minimize_scalar(_g, np.array([.5]), bounds=(0., 1.), method='bounded')
-    # A_new = (1 - out.x) * candidates[idx] + out.x * A_old
-
-    # return A_new, loss_function(S, A_new) - C
-
     return candidates[idx], losses[idx]
+
+
+def valid_nabla_mult(loss_gen, loss_function, S_t, A_t, nabla_A_t, g_t, tol):
+# def valid_nabla_mult(loss_function, S_t, A_t, nabla_A_t, g_t, tol):
+    sign_g = np.sign(g_t)[:, None, None]
+    loss_A_t = loss_gen(loss_function, S_t, A_t) 
+    # sign_g = np.sign(g_t)
+    # loss_A_t = loss_function(S_t, A_t) 
+        
+    def _f(x):
+        loss_x = loss_gen(loss_function, S_t, A_t + sign_g * 1 / x * nabla_A_t)
+        # loss_x = loss_function(S, A + sign_g * 1 / x * nabla_A_t)
+        # pdb.set_trace()
+        return np.max((loss_A_t + sign_g * 1 / x * np.sum(nabla_A_t * nabla_A_t, (1, 2)) - loss_x) ** 2) - tol
+        # return (loss_A_t + sign_g * 1 / x * np.sum(nabla_A_t * nabla_A_t) - loss_x) ** 2 - tol
+
+    out = minimize_scalar(_f)
+    # pdb.set_trace()
+    return sign_g * np.minimum((1 / np.abs(out.x)) / np.abs(g_t), np.abs(g_t))[:, None, None]
+    # return sign_g * np.minimum(np.abs(1 / out.x) / np.abs(g_t), np.abs(g_t))
+
 
 def prox_linf_1d(a, lamda):
     """Proximal operator for the l-inf norm.

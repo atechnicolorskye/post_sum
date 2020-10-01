@@ -37,6 +37,7 @@ from __future__ import division
 from itertools import compress 
 
 import warnings
+import copy
 
 import numpy as np
 from scipy import linalg
@@ -48,7 +49,7 @@ from sklearn.utils.validation import check_X_y
 from regain.covariance.graphical_lasso_ import (
     GraphicalLasso, init_precision, neg_logl, dtrace)
 from regain.norm import l1_od_norm
-from regain.prox import soft_thresholding_od_alt
+from regain.prox import soft_thresholding_od, valid_nabla_mult
 from regain.update_rules import update_rho
 from regain.utils import convergence, error_norm_time
 from regain.validation import check_norm_prox
@@ -157,25 +158,43 @@ def taylor_prox_time_graphical_lasso(
             obj=penalty_objective(Z_0, Z_1, Z_2, psi, theta))
     ]
 
+    # log_g_tol = -1.4
+
     for iteration_ in range(max_iter):
         if iteration_ == 0:
-            nabla_mult = np.zeros(S.shape[0])
+            g = np.zeros(S.shape[0])
             nabla_A = np.zeros_like(Z_0)
+            power = 0
+            nabla_mult = np.zeros(S.shape[0])[:, None, None]
         else:
             if loss_function.__name__ == 'neg_logl':
-                nabla_A = np.array([S_t - np.linalg.inv(A_t) for (A_t, S_t) in zip(Z_0_old, S)])
+                nabla_A = np.array([S_t - np.linalg.inv(A_t) for (S_t, A_t) in zip(S, Z_0_old)])
             elif loss_function.__name__ == 'dtrace': 
-                nabla_A = np.array([(2 * A_t @ S_t - I) for (A_t, S_t) in zip(Z_0_old, S)])
-            nabla_mult = -loss_gen(loss_function, S, Z_0_old) - 1 + C - u_0
-            nabla_mult += np.array([np.sum(nabla_A_t * A_t) for (nabla_A_t, A_t) in zip(nabla_A, Z_0_old)]) 
+                nabla_A = np.array([(2 * A_t @ S_t - I) for (S_t, A_t) in zip(S, Z_0_old)])
+            g = -loss_gen(loss_function, S, Z_0_old) - 1 + C - u_0
+            g += np.array([np.sum(nabla_A_t * A_t) for (nabla_A_t, A_t) in zip(nabla_A, Z_0_old)]) 
+            
+            # max_grad = np.max([np.abs(g_t * np.linalg.norm(nabla_A_t)) for (g_t, nabla_A_t) in zip(g, nabla_A)])
+            # max_Z_0_old = np.max([np.linalg.norm(A_t) for A_t in Z_0_old]) 
+            # power = log_g_tol - np.log10(max_grad / max_Z_0_old)
+            # print(np.log10(max_grad / max_Z_0_old))
+            # if power == -3.0:
+            #     pdb.set_trace()
+            # nabla_mult = np.array([
+            #     valid_nabla_mult(loss_function, S_t, A_t, nabla_A_t, g_t, 1e-1) for (S_t, A_t, nabla_A_t, g_t) in zip(S, Z_0_old, nabla_A, g)
+            #     ])
+            nabla_mult = valid_nabla_mult(loss_gen, loss_function, S, Z_0_old, nabla_A, g, 1e1) 
 
-        A_K_pen = Z_0_old + 1e-4 * nabla_mult[:, None, None] * nabla_A
+
+        A_K_pen = Z_0_old + nabla_mult * nabla_A
+        # A_K_pen = Z_0_old + 10 ** power * g[:, None, None] * nabla_A # 1e-4 works well
+        # A_K_pen = Z_0_old + 1e-4 * g[:, None, None] * nabla_A # 1e-4 works well
         A_K_pen[:-1] += Z_1 - U_1
         A_K_pen[1:] += Z_2 - U_2
         A_K_pen += A_K_pen.transpose(0, 2, 1)
         A_K_pen /= 2.
 
-        Z_0 = soft_thresholding_od_alt(A_K_pen / divisor[:, None, None], lamda=theta / rho, div=divisor)
+        Z_0 = soft_thresholding_od(A_K_pen / divisor[:, None, None], lamda=theta / (rho * divisor))
 
         # other Zs
         A_1 = Z_0[:-1] + U_1

@@ -50,7 +50,7 @@ import cvxpy as cp
 from regain.covariance.graphical_lasso_ import (
     GraphicalLasso, init_precision, neg_logl, dtrace)
 from regain.norm import l1_od_norm
-from regain.prox import soft_thresholding_od, soft_thresholding_od_alt
+from regain.prox import soft_thresholding_od
 from regain.update_rules import update_rho
 from regain.utils import convergence, error_norm_time
 from regain.validation import check_norm_prox
