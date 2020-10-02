@@ -191,27 +191,7 @@ def prox_grad(loss_function, S, A, A_old, C, tol):
     idx = np.argmin(losses)
     
     return candidates[idx], losses[idx]
-
-
-def valid_nabla_mult(loss_gen, loss_function, S_t, A_t, nabla_A_t, g_t, tol):
-# def valid_nabla_mult(loss_function, S_t, A_t, nabla_A_t, g_t, tol):
-    sign_g = np.sign(g_t)[:, None, None]
-    loss_A_t = loss_gen(loss_function, S_t, A_t) 
-    # sign_g = np.sign(g_t)
-    # loss_A_t = loss_function(S_t, A_t) 
-        
-    def _f(x):
-        loss_x = loss_gen(loss_function, S_t, A_t + sign_g * 1 / x * nabla_A_t)
-        # loss_x = loss_function(S, A + sign_g * 1 / x * nabla_A_t)
-        # pdb.set_trace()
-        return np.max((loss_A_t + sign_g * 1 / x * np.sum(nabla_A_t * nabla_A_t, (1, 2)) - loss_x) ** 2) - tol
-        # return (loss_A_t + sign_g * 1 / x * np.sum(nabla_A_t * nabla_A_t) - loss_x) ** 2 - tol
-
-    out = minimize_scalar(_f)
-    # pdb.set_trace()
-    return sign_g * np.minimum((1 / np.abs(out.x)) / np.abs(g_t), np.abs(g_t))[:, None, None]
-    # return sign_g * np.minimum(np.abs(1 / out.x) / np.abs(g_t), np.abs(g_t))
-
+    
 
 def prox_linf_1d(a, lamda):
     """Proximal operator for the l-inf norm.
