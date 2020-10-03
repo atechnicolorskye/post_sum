@@ -54,6 +54,8 @@ from regain.update_rules import update_rho
 from regain.utils import convergence, error_norm_time
 from regain.validation import check_norm_prox
 
+from scipy.optimize import minimize_scalar
+
 import pdb
 
 def loss_gen(loss, S, K):
@@ -158,9 +160,8 @@ def taylor_prox_time_graphical_lasso(
             obj=penalty_objective(Z_0, Z_1, Z_2, psi, theta))
     ]
 
-    g_tol = 0.1 * 1e-3 
-
     for iteration_ in range(max_iter):
+        res_old = loss_gen(loss_function, S, Z_0_old) - C
         if iteration_ == 0:
             g = np.zeros(S.shape[0])
             nabla_A = np.zeros_like(Z_0)
@@ -169,19 +170,26 @@ def taylor_prox_time_graphical_lasso(
                 nabla_A = np.array([S_t - np.linalg.inv(A_t) for (S_t, A_t) in zip(S, Z_0_old)])
             elif loss_function.__name__ == 'dtrace': 
                 nabla_A = np.array([(2 * A_t @ S_t - I) for (S_t, A_t) in zip(S, Z_0_old)])
-            g = -loss_gen(loss_function, S, Z_0_old) + C - u_0
+            g = - res_old - u_0
             g += np.array([np.sum(nabla_A_t * A_t) for (nabla_A_t, A_t) in zip(nabla_A, Z_0_old)]) 
 
-        A_p_p = Z_0_old + g_tol * g[:, None, None] * nabla_A
-        A_p_p[:-1] += Z_1 - U_1
-        A_p_p[1:] += Z_2 - U_2
-        trace_nabla_A_A_p_p = np.sum(nabla_A * A_p_p, (1, 2))
-        trace_nabla_A_nabla_A =  np.sum(nabla_A * nabla_A, (1, 2)) / divisor
-        A_k = A_p_p / divisor[:, None, None] - g_tol * (trace_nabla_A_A_p_p / (1 + trace_nabla_A_nabla_A))[:, None, None] * nabla_A
-        A_k += A_k.transpose(0, 2, 1)
-        A_k /= 2.
+        def _Z_0(x):
+            A_p_p = Z_0_old + x * g[:, None, None] * nabla_A
+            A_p_p[:-1] += Z_1 - U_1
+            A_p_p[1:] += Z_2 - U_2
+            trace_nabla_A_A_p_p = np.sum(nabla_A * A_p_p, (1, 2))
+            trace_nabla_A_nabla_A =  np.sum(nabla_A * nabla_A, (1, 2)) / divisor
+            A_k = A_p_p / divisor[:, None, None] - x * (trace_nabla_A_A_p_p / (1 + trace_nabla_A_nabla_A))[:, None, None] * nabla_A
+            A_k += A_k.transpose(0, 2, 1)
+            A_k /= 2.
+            return soft_thresholding_od(A_k, lamda=theta / (rho * divisor))
 
-        Z_0 = soft_thresholding_od(A_k, lamda=theta / (rho * divisor))
+        def _f(x):
+            return np.mean((loss_gen(loss_function, S, _Z_0(x)) - C) ** 2)
+
+        out = minimize_scalar(_f)
+        Z_0 = _Z_0(out.x)
+        # print(out.x)
 
         # other Zs
         A_1 = Z_0[:-1] + U_1
@@ -197,14 +205,16 @@ def taylor_prox_time_graphical_lasso(
 
         # update residuals
         res = loss_gen(loss_function, S, Z_0) - C
-        print(np.mean(res))
+        # print(np.mean(res))
         u_0 += res
         U_1 += Z_0[:-1] - Z_1
         U_2 += Z_0[1:] - Z_2
 
         # diagnostics, reporting, termination checks
         rnorm = np.sqrt(squared_norm(Z_0[:-1] - Z_1) + squared_norm(Z_0[1:] - Z_2))
-        snorm = np.sqrt(squared_norm(Z_1 - Z_1_old) + squared_norm(Z_2 - Z_2_old))
+        snorm = rho * np.sqrt(
+            squared_norm(res - res_old) +
+            squared_norm(Z_1 - Z_1_old) + squared_norm(Z_2 - Z_2_old))
 
         obj = penalty_objective(Z_0, Z_1, Z_2, psi, theta)
 
@@ -217,8 +227,8 @@ def taylor_prox_time_graphical_lasso(
                     squared_norm(Z_1) + squared_norm(Z_2)),
                 np.sqrt(
                     squared_norm(Z_0[:-1]) + squared_norm(Z_0[1:]))),
-            e_dual=np.sqrt(2 * Z_1.size) * tol + rtol * rho *
-                np.sqrt(squared_norm(U_1) + squared_norm(U_2))
+            e_dual=np.sqrt(u_0.size + 2 * Z_1.size) * tol + rtol * rho *
+                np.sqrt(squared_norm(u_0) + squared_norm(U_1) + squared_norm(U_2))
         )
 
         Z_0_old = Z_0.copy()
@@ -231,20 +241,20 @@ def taylor_prox_time_graphical_lasso(
                 "eps_pri: %.4f, eps_dual: %.4f" % check[:5])
 
         out_obj.append(penalty_objective(Z_0, Z_0[:-1], Z_0[1:], psi, theta))
-        # print(out_obj)
+        print(out_obj[-1])
         checks.append(check)
 
-        # if len(out_obj) > 10 and c_prox == 'grad':
+        # if len(out_obj) > 10:
         #     if (np.mean(out_obj[-11:-1]) - np.mean(out_obj[-10:])) < 1e-4:
         #         print('obj break')
         #         break
 
-        # if stop_at is not None:
-        #     if abs(check.obj - stop_at) / abs(stop_at) < stop_when:
-        #         break
+        if stop_at is not None:
+            if abs(check.obj - stop_at) / abs(stop_at) < stop_when:
+                break
 
-        # if check.rnorm <= check.e_pri and check.snorm <= check.e_dual:
-        #     break
+        if check.rnorm <= check.e_pri and check.snorm <= check.e_dual:
+            break
 
         # rho_new = update_rho(
         #     rho, rnorm, snorm, iteration=iteration_,
