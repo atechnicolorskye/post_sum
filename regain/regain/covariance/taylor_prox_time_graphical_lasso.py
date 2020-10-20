@@ -140,7 +140,8 @@ def taylor_prox_time_graphical_lasso(
     Z_1 = Z_0.copy()[:-1] 
     Z_2 = Z_0.copy()[1:]  
 
-    u_0 = np.zeros(S.shape[0])
+    u = np.zeros(S.shape[0])
+    # U_0 = np.zeros_like(Z_0) 
     U_1 = np.zeros_like(Z_1)
     U_2 = np.zeros_like(Z_2)
 
@@ -161,25 +162,42 @@ def taylor_prox_time_graphical_lasso(
     ]
 
     for iteration_ in range(max_iter):
-        res_old = loss_gen(loss_function, S, Z_0_old) - C
+        loss_res_old = loss_gen(loss_function, S, Z_0_old) - C
         if iteration_ == 0:
+            trace_nabla_Z_0_old =  np.zeros(S.shape[0])
             g = np.zeros(S.shape[0])
-            nabla_A = np.zeros_like(Z_0)
+            nabla = np.zeros_like(Z_0)
         else:
             if loss_function.__name__ == 'neg_logl':
-                nabla_A = np.array([S_t - np.linalg.inv(A_t) for (S_t, A_t) in zip(S, Z_0_old)])
+                nabla = np.array([S_t - np.linalg.inv(Z_0_old_t) for (S_t, Z_0_old_t) in zip(S, Z_0_old)])
             elif loss_function.__name__ == 'dtrace': 
-                nabla_A = np.array([(2 * A_t @ S_t - I) for (S_t, A_t) in zip(S, Z_0_old)])
-            g = - res_old - u_0
-            g += np.array([np.sum(nabla_A_t * A_t) for (nabla_A_t, A_t) in zip(nabla_A, Z_0_old)]) 
+                nabla = np.array([(2 * Z_0_old_t @ S_t - I) for (S_t, Z_0_old_t) in zip(S, Z_0_old)])
+            g = - loss_res_old - u
+            trace_nabla_Z_0_old = np.array([np.sum(nabla_t * Z_0_old_t) for (nabla_t, Z_0_old_t) in zip(nabla, Z_0_old)])
+            g +=  trace_nabla_Z_0_old
 
-        def _Z_0(x):
-            A_p_p = Z_0_old + x * g[:, None, None] * nabla_A
+        if np.max(loss_res_old) > 0:
+            switch = 1
+        else:
+            switch = 0
+
+        def v_Z_0():
+            A_p_p = Z_0_old
             A_p_p[:-1] += Z_1 - U_1
             A_p_p[1:] += Z_2 - U_2
-            trace_nabla_A_A_p_p = np.sum(nabla_A * A_p_p, (1, 2))
-            trace_nabla_A_nabla_A =  np.sum(nabla_A * nabla_A, (1, 2)) / divisor
-            A_k = A_p_p / divisor[:, None, None] - x * (trace_nabla_A_A_p_p / (1 + trace_nabla_A_nabla_A))[:, None, None] * nabla_A
+            A_k = A_p_p / divisor[:, None, None]
+            A_k += A_k.transpose(0, 2, 1)
+            A_k /= 2.
+            return soft_thresholding_od(A_k, lamda=theta / (rho * divisor))
+
+        def _Z_0(x):
+            A_p_p = Z_0_old + x * g[:, None, None] * nabla
+            # A_p_p = Z_0_old - U_0 + x * g[:, None, None] * nabla
+            A_p_p[:-1] += Z_1 - U_1
+            A_p_p[1:] += Z_2 - U_2
+            trace_nabla_A_p_p = np.sum(nabla * A_p_p, (1, 2))
+            trace_nabla_nabla =  np.sum(nabla * nabla, (1, 2)) / divisor
+            A_k = A_p_p / divisor[:, None, None] - x * (trace_nabla_A_p_p / (1 + trace_nabla_nabla))[:, None, None] * nabla
             A_k += A_k.transpose(0, 2, 1)
             A_k /= 2.
             return soft_thresholding_od(A_k, lamda=theta / (rho * divisor))
@@ -187,9 +205,15 @@ def taylor_prox_time_graphical_lasso(
         def _f(x):
             return np.mean((loss_gen(loss_function, S, _Z_0(x)) - C) ** 2)
 
-        out = minimize_scalar(_f)
-        Z_0 = _Z_0(out.x)
-        # print(out.x)
+        if switch:
+            pdb.set_trace()
+            # out = minimize_scalar(_f, bounds=(0., 1.),  method='bounded')    
+            out = minimize_scalar(_f)    
+            Z_0 = _Z_0(out.x)
+            print(out.fun, out.x)
+        else:
+            Z_0 = v_Z_0()
+        # Z_0 = _Z_0(1e-6)
 
         # other Zs
         A_1 = Z_0[:-1] + U_1
@@ -204,17 +228,28 @@ def taylor_prox_time_graphical_lasso(
                 rho=rho, tol=tol, rtol=rtol, max_iter=max_iter)
 
         # update residuals
-        res = loss_gen(loss_function, S, Z_0) - C
+        loss_res = loss_gen(loss_function, S, Z_0) - C
         # print(np.mean(res))
-        u_0 += res
+        Z_0_res = Z_0 - Z_0_old
+        if np.max(loss_res) > 0: 
+            u += loss_res
+        # U_0 += Z_0_res 
         U_1 += Z_0[:-1] - Z_1
         U_2 += Z_0[1:] - Z_2
 
         # diagnostics, reporting, termination checks
-        rnorm = np.sqrt(squared_norm(Z_0[:-1] - Z_1) + squared_norm(Z_0[1:] - Z_2))
+        rnorm = np.sqrt(
+            squared_norm(loss_res) + # squared_norm(Z_0_res) + 
+            squared_norm(Z_0[:-1] - Z_1) + squared_norm(Z_0[1:] - Z_2)
+            )
+
+        dual_con_res = loss_res - loss_res_old
+        dual_con_res += (trace_nabla_Z_0_old - np.array([np.sum(nabla_t * A_t) for (nabla_t, A_t) in zip(nabla, Z_0)]))
+
         snorm = rho * np.sqrt(
-            squared_norm(res - res_old) +
-            squared_norm(Z_1 - Z_1_old) + squared_norm(Z_2 - Z_2_old))
+            squared_norm(dual_con_res[:, None, None] * nabla) + 
+            squared_norm(Z_1 - Z_1_old) + squared_norm(Z_2 - Z_2_old)
+            )
 
         obj = penalty_objective(Z_0, Z_1, Z_2, psi, theta)
 
@@ -222,13 +257,20 @@ def taylor_prox_time_graphical_lasso(
             obj=obj,
             rnorm=rnorm,
             snorm=snorm,
-            e_pri=np.sqrt(2 * Z_1.size) * tol + rtol * max(
+            # e_pri=np.sqrt(loss_res.size + Z_0.size + 2 * Z_1.size) * tol + rtol * 
+            e_pri=np.sqrt(loss_res.size + 2 * Z_1.size) * tol + rtol * 
+                (
+                max(np.sqrt(squared_norm(loss_res + C)), np.sqrt(squared_norm(C))) + 
+                # max(np.sqrt(squared_norm(Z_0)), np.sqrt(squared_norm(Z_0_old))) +
+                max(np.sqrt(squared_norm(Z_1)), np.sqrt(squared_norm(Z_0[:-1]))) + 
+                max(np.sqrt(squared_norm(Z_2)), np.sqrt(squared_norm(Z_0[1:])))
+                ),
+            e_dual=np.sqrt(loss_res.size + 2 * Z_1.size) * tol + rtol * rho *
                 np.sqrt(
-                    squared_norm(Z_1) + squared_norm(Z_2)),
-                np.sqrt(
-                    squared_norm(Z_0[:-1]) + squared_norm(Z_0[1:]))),
-            e_dual=np.sqrt(u_0.size + 2 * Z_1.size) * tol + rtol * rho *
-                np.sqrt(squared_norm(u_0) + squared_norm(U_1) + squared_norm(U_2))
+                    squared_norm(u) +
+                    squared_norm(U_1) + 
+                    squared_norm(U_2)
+                 )
         )
 
         Z_0_old = Z_0.copy()

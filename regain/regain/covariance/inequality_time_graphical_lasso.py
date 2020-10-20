@@ -244,8 +244,8 @@ def inequality_time_graphical_lasso(
         out_obj.append(penalty_objective(Z_0, Z_0[:-1], Z_0[1:], psi, theta))
         checks.append(check)
 
-        if len(out_obj) > 10 and c_prox == 'grad':
-            if (np.mean(out_obj[-11:-1]) - np.mean(out_obj[-10:])) < 1e-4:
+        if len(out_obj) > 100 and c_prox == 'grad':
+            if (np.mean(out_obj[-11:-1]) - np.mean(out_obj[-10:])) < stop_when:
                 print('obj break')
                 break
 

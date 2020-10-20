@@ -152,7 +152,7 @@ def cvx_inequality_time_graphical_lasso(
 
     prob = cp.Problem(objective, constraints)
     # prob.solve(solver=cp.SCS, max_iters=np.int(max_iter), eps=tol, verbose=True)
-    prob.solve(solver=cp.MOSEK)
+    prob.solve(solver=cp.MOSEK, verbose=True)
 
     print(prob.status)
     print(prob.value)
