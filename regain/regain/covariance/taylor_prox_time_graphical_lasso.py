@@ -172,32 +172,18 @@ def taylor_prox_time_graphical_lasso(
                 nabla = np.array([S_t - np.linalg.inv(Z_0_old_t) for (S_t, Z_0_old_t) in zip(S, Z_0_old)])
             elif loss_function.__name__ == 'dtrace': 
                 nabla = np.array([(2 * Z_0_old_t @ S_t - I) for (S_t, Z_0_old_t) in zip(S, Z_0_old)])
-            g = - loss_res_old - u
+            g = loss_res_old + u
             trace_nabla_Z_0_old = np.array([np.sum(nabla_t * Z_0_old_t) for (nabla_t, Z_0_old_t) in zip(nabla, Z_0_old)])
-            g +=  trace_nabla_Z_0_old
-
-        if np.max(loss_res_old) > 0:
-            switch = 1
-        else:
-            switch = 0
-
-        def v_Z_0():
-            A_p_p = Z_0_old
-            A_p_p[:-1] += Z_1 - U_1
-            A_p_p[1:] += Z_2 - U_2
-            A_k = A_p_p / divisor[:, None, None]
-            A_k += A_k.transpose(0, 2, 1)
-            A_k /= 2.
-            return soft_thresholding_od(A_k, lamda=theta / (rho * divisor))
+            g -=  trace_nabla_Z_0_old
 
         def _Z_0(x):
-            A_p_p = Z_0_old + x * g[:, None, None] * nabla
-            # A_p_p = Z_0_old - U_0 + x * g[:, None, None] * nabla
-            A_p_p[:-1] += Z_1 - U_1
-            A_p_p[1:] += Z_2 - U_2
-            trace_nabla_A_p_p = np.sum(nabla * A_p_p, (1, 2))
-            trace_nabla_nabla =  np.sum(nabla * nabla, (1, 2)) / divisor
-            A_k = A_p_p / divisor[:, None, None] - x * (trace_nabla_A_p_p / (1 + trace_nabla_nabla))[:, None, None] * nabla
+            A_p = Z_0_old - x * g[:, None, None] * nabla
+            # A_p = Z_0_old - U_0 + x * g[:, None, None] * nabla
+            A_p[:-1] += Z_1 - U_1
+            A_p[1:] += Z_2 - U_2
+            trace_nabla_A_p = np.sum(nabla * A_p, (1, 2))
+            trace_nabla_nabla =  np.sum(nabla * nabla, (1, 2))
+            A_k = A_p / divisor[:, None, None] - x * (trace_nabla_A_p / (divisor + x * trace_nabla_nabla))[:, None, None] * nabla
             A_k += A_k.transpose(0, 2, 1)
             A_k /= 2.
             return soft_thresholding_od(A_k, lamda=theta / (rho * divisor))
@@ -205,15 +191,8 @@ def taylor_prox_time_graphical_lasso(
         def _f(x):
             return np.mean((loss_gen(loss_function, S, _Z_0(x)) - C) ** 2)
 
-        if switch:
-            pdb.set_trace()
-            # out = minimize_scalar(_f, bounds=(0., 1.),  method='bounded')    
-            out = minimize_scalar(_f)    
-            Z_0 = _Z_0(out.x)
-            print(out.fun, out.x)
-        else:
-            Z_0 = v_Z_0()
-        # Z_0 = _Z_0(1e-6)
+        out = minimize_scalar(_f)    
+        Z_0 = _Z_0(out.x)
 
         # other Zs
         A_1 = Z_0[:-1] + U_1
@@ -230,9 +209,8 @@ def taylor_prox_time_graphical_lasso(
         # update residuals
         loss_res = loss_gen(loss_function, S, Z_0) - C
         # print(np.mean(res))
-        Z_0_res = Z_0 - Z_0_old
-        if np.max(loss_res) > 0: 
-            u += loss_res
+        # Z_0_res = Z_0 - Z_0_old
+        u += loss_res
         # U_0 += Z_0_res 
         U_1 += Z_0[:-1] - Z_1
         U_2 += Z_0[1:] - Z_2
@@ -283,7 +261,10 @@ def taylor_prox_time_graphical_lasso(
                 "eps_pri: %.4f, eps_dual: %.4f" % check[:5])
 
         out_obj.append(penalty_objective(Z_0, Z_0[:-1], Z_0[1:], psi, theta))
-        print(out_obj[-1])
+        if not iteration_ % 500:
+            print(iteration_)
+            print(out.fun, out.x)
+            print(out_obj[-1])
         checks.append(check)
 
         # if len(out_obj) > 10:
