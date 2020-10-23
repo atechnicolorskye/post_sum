@@ -177,12 +177,9 @@ def inequality_time_graphical_lasso(
                 Z_0[i], loss_i = prox_cvx(loss_function, S[i], Z_0[i], Z_0_old[i], C[i], div)
             elif c_prox == 'grad':
                 if i > 0:
-                    Z_0[i], loss_i = prox_grad(loss_function, S[i], Z_0[i], Z_0_old[i], C[i], 0.) # tol = 1e-4
+                    Z_0[i], loss_i = prox_grad(loss_function, S[i], Z_0[i], Z_0_old[i], C[i], 0.)
                 else:
                     Z_0[i], loss_i = prox_grad(loss_function, S[i], Z_0[i], Z_0_old[i], C[i], 0.)
-
-        # if c_prox == 'cvx' and len(infeasible_indices) > 0:
-        #     rho = rho / 2.
 
         # break if losses post-correction blow up
         losses_all_new = loss_gen(loss_function, S, Z_0)   
@@ -214,7 +211,7 @@ def inequality_time_graphical_lasso(
 
         # diagnostics, reporting, termination checks
         rnorm = np.sqrt(squared_norm(Z_0[:-1] - Z_1) + squared_norm(Z_0[1:] - Z_2))
-        snorm = np.sqrt(squared_norm(Z_1 - Z_1_old) + squared_norm(Z_2 - Z_2_old))
+        snorm = rho * np.sqrt(squared_norm(Z_1 - Z_1_old) + squared_norm(Z_2 - Z_2_old))
 
         obj = penalty_objective(Z_0, Z_1, Z_2, psi, theta)
 
@@ -222,11 +219,12 @@ def inequality_time_graphical_lasso(
             obj=obj,
             rnorm=rnorm,
             snorm=snorm,
-            e_pri=np.sqrt(2 * Z_1.size) * tol + rtol * max(
-                np.sqrt(
-                    squared_norm(Z_1) + squared_norm(Z_2)),
-                np.sqrt(
-                    squared_norm(Z_0[:-1]) + squared_norm(Z_0[1:]))),
+            e_pri=np.sqrt(losses_all_new.size + 2 * Z_1.size) * tol + rtol * 
+                (
+                max(np.sqrt(squared_norm(losses_all_new)), np.sqrt(squared_norm(C))) + 
+                max(np.sqrt(squared_norm(Z_1)), np.sqrt(squared_norm(Z_0[:-1]))) + 
+                max(np.sqrt(squared_norm(Z_2)), np.sqrt(squared_norm(Z_0[1:])))
+                ),
             e_dual=np.sqrt(2 * Z_1.size) * tol + rtol * rho *
                 np.sqrt(squared_norm(U_1) + squared_norm(U_2))
         )
@@ -244,10 +242,10 @@ def inequality_time_graphical_lasso(
         out_obj.append(penalty_objective(Z_0, Z_0[:-1], Z_0[1:], psi, theta))
         checks.append(check)
 
-        if len(out_obj) > 100 and c_prox == 'grad':
-            if (np.mean(out_obj[-11:-1]) - np.mean(out_obj[-10:])) < stop_when:
-                print('obj break')
-                break
+        # if len(out_obj) > 100 and c_prox == 'grad':
+        #     if (np.mean(out_obj[-11:-1]) - np.mean(out_obj[-10:])) < stop_when:
+        #         print('obj break')
+        #         break
 
         if stop_at is not None:
             if abs(check.obj - stop_at) / abs(stop_at) < stop_when:

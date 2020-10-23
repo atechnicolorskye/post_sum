@@ -65,9 +65,9 @@ def loss_gen(loss, S, K):
     return losses
 
 
-def penalty_objective(Z_0, Z_1, Z_2, psi):
+def penalty_objective(Z_0, Z_1, Z_2, psi, theta):
     """Penalty-only objective function for time-varying graphical LASSO."""
-    return sum(map(l1_od_norm, Z_0)) + sum(map(psi, Z_2 - Z_1))
+    return theta * sum(map(l1_od_norm, Z_0)) + (1 - theta) * sum(map(psi, Z_2 - Z_1))
 
 
 def cvx_inequality_time_graphical_lasso(
@@ -156,6 +156,7 @@ def cvx_inequality_time_graphical_lasso(
 
     print(prob.status)
     print(prob.value)
+    # print(penalty_objective(Z_0, Z_0[:-1], Z_0[1:], psi, theta))
 
     K = np.array([k.value for k in K])
     covariance_ = np.array([linalg.pinvh(k) for k in K])

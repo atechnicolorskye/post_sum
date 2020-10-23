@@ -136,11 +136,13 @@ def taylor_prox_time_graphical_lasso(
     else:
         loss_function = dtrace
 
+    T = S.shape[0]
+
     Z_0 = K_init # init_precision(S, mode=init)
     Z_1 = Z_0.copy()[:-1] 
     Z_2 = Z_0.copy()[1:]  
 
-    u = np.zeros(S.shape[0])
+    u = np.zeros(T)
     # U_0 = np.zeros_like(Z_0) 
     U_1 = np.zeros_like(Z_1)
     U_2 = np.zeros_like(Z_2)
@@ -150,10 +152,12 @@ def taylor_prox_time_graphical_lasso(
     Z_2_old = np.zeros_like(Z_2)
 
     # divisor for consensus variables, accounting for one less matrix for t = 0 and t = T
-    divisor = np.full(S.shape[0], 3, dtype=float)
+    divisor = np.full(T, 3, dtype=float)
+    # divisor = np.full(T, 2, dtype=float)
     divisor[0] -= 1
     divisor[-1] -= 1
 
+    con_obj = []
     out_obj = []
 
     checks = [
@@ -161,10 +165,62 @@ def taylor_prox_time_graphical_lasso(
             obj=penalty_objective(Z_0, Z_1, Z_2, psi, theta))
     ]
 
+    switch = 50
+
     for iteration_ in range(max_iter):
+        # if iteration_ == 0:
+        #     loss_res_old = loss_gen(loss_function, S, Z_0_old) - C
+        # if loss_function.__name__ == 'neg_logl':
+        #         nabla = np.array([S_t - np.linalg.inv(Z_0_old_t) for (S_t, Z_0_old_t) in zip(S, Z_0_old)])
+        # elif loss_function.__name__ == 'dtrace': 
+        #     nabla = np.array([(2 * Z_0_old_t @ S_t - I) for (S_t, Z_0_old_t) in zip(S, Z_0_old)])
+        # trace_nabla_Z_0_old = np.array([np.sum(nabla_t * Z_0_old_t) for (nabla_t, Z_0_old_t) in zip(nabla, Z_0_old)])
+
+        # A_k = Z_0_old.copy() 
+        # A_k[:-1] += Z_1 - U_1
+        # A_k[1:] += Z_2 - U_2
+        # A_k += A_k.transpose(0, 2, 1)
+        # A_k /= 2.
+        
+        # Z_0 = soft_thresholding_od(A_k / divisor[:, None, None], lamda=theta / (rho * divisor))
+
+        # # check feasibility and perform line search if necessary
+        # loss_res = loss_gen(loss_function, S, Z_0) - C
+        # feasibility_check = loss_res > 0
+        # infeasible_indices = list(compress(range(len(feasibility_check)), feasibility_check)) 
+
+        # for i in infeasible_indices:
+        #     g = loss_res_old[i] + u[i] - trace_nabla_Z_0_old[i]
+
+        #     def _Z_0_t(x):
+        #         A_k_t = Z_0_old[i].copy() - x * g * nabla[i]
+        #         if i < T - 2:
+        #             A_k_t += Z_1[i] - U_1[i]
+        #         if i > 0:
+        #             A_k_t += Z_2[i-1] - U_2[i-1]
+        #         trace_nabla_A_k_t = np.sum(nabla[i] * A_k_t)
+        #         trace_nabla_t_nabla_t =  np.sum(nabla[i] * nabla[i])
+        #         A_k_t = A_k_t - x * (trace_nabla_A_k_t / (divisor[i] + x * trace_nabla_t_nabla_t)) * nabla[i]
+        #         A_k_t += A_k_t.transpose(1, 0)
+        #         A_k_t /= 2.
+        #         return soft_thresholding_od(A_k_t / divisor[i], lamda=theta / (rho * divisor[i]))
+        #         return A_k_t
+
+        #     def _f(x):
+        #         return (loss_function(S[i], _Z_0_t(x)) - C[i]) ** 2
+
+        #     # out = minimize_scalar(_f, bounds=(-1., 1.), method='bounded')   
+        #     out = minimize_scalar(_f)   
+        #     Z_0_i = _Z_0_t(out.x) 
+        #     loss_res_i_old = loss_res[i]
+        #     loss_res[i] = loss_function(S[i], Z_0_i) - C[i]
+        #     if np.isinf(loss_res[i]):
+        #         pdb.set_trace()
+        #     Z_0[i] = Z_0_i
+
         loss_res_old = loss_gen(loss_function, S, Z_0_old) - C
         if iteration_ == 0:
-            trace_nabla_Z_0_old =  np.zeros(S.shape[0])
+            trace_nabla_Z_0_old =  np.zeros(T)
             g = np.zeros(S.shape[0])
             nabla = np.zeros_like(Z_0)
         else:
@@ -178,19 +234,24 @@ def taylor_prox_time_graphical_lasso(
 
         def _Z_0(x):
             A_p = Z_0_old - x * g[:, None, None] * nabla
+            # A_p = - x * g[:, None, None] * nabla
             # A_p = Z_0_old - U_0 + x * g[:, None, None] * nabla
             A_p[:-1] += Z_1 - U_1
             A_p[1:] += Z_2 - U_2
             trace_nabla_A_p = np.sum(nabla * A_p, (1, 2))
             trace_nabla_nabla =  np.sum(nabla * nabla, (1, 2))
-            A_k = A_p / divisor[:, None, None] - x * (trace_nabla_A_p / (divisor + x * trace_nabla_nabla))[:, None, None] * nabla
+            A_k = A_p - x * (trace_nabla_A_p / (divisor + x * trace_nabla_nabla))[:, None, None] * nabla
             A_k += A_k.transpose(0, 2, 1)
             A_k /= 2.
-            return soft_thresholding_od(A_k, lamda=theta / (rho * divisor))
+            return soft_thresholding_od(A_k / divisor[:, None, None], lamda=theta / (rho * divisor))
 
         def _f(x):
+            # _Z = _Z_0(x)
+            # mask = (np.abs(_Z) > 1e-4)
+            # return np.mean((loss_gen(loss_function, S, mask * _Z) - C) ** 2)
             return np.mean((loss_gen(loss_function, S, _Z_0(x)) - C) ** 2)
 
+        # out = minimize_scalar(_f, bounds=(-1., 1.), method='bounded')    
         out = minimize_scalar(_f)    
         Z_0 = _Z_0(out.x)
 
@@ -198,18 +259,21 @@ def taylor_prox_time_graphical_lasso(
         A_1 = Z_0[:-1] + U_1
         A_2 = Z_0[1:] + U_2
         if not psi_node_penalty:
-            prox_e = prox_psi(A_2 - A_1, lamda=2. * (1- theta) / rho)
+            prox_e = prox_psi(A_2 - A_1, lamda=2. * (1 - theta) / rho)
             Z_1 = .5 * (A_1 + A_2 - prox_e)
             Z_2 = .5 * (A_1 + A_2 + prox_e)
         else:
             Z_1, Z_2 = prox_psi(
-                np.concatenate((A_1, A_2), axis=1), lamda=.5 * (1- theta) / rho,
+                np.concatenate((A_1, A_2), axis=1), lamda=.5 * (1 - theta) / rho,
                 rho=rho, tol=tol, rtol=rtol, max_iter=max_iter)
 
         # update residuals
         loss_res = loss_gen(loss_function, S, Z_0) - C
+        con_obj.append(np.mean(loss_res ** 2))
         # print(np.mean(res))
         # Z_0_res = Z_0 - Z_0_old
+        # for i in infeasible_indices:
+            # u[i] += loss_res[i]
         u += loss_res
         # U_0 += Z_0_res 
         U_1 += Z_0[:-1] - Z_1
@@ -223,6 +287,8 @@ def taylor_prox_time_graphical_lasso(
 
         dual_con_res = loss_res - loss_res_old
         dual_con_res += (trace_nabla_Z_0_old - np.array([np.sum(nabla_t * A_t) for (nabla_t, A_t) in zip(nabla, Z_0)]))
+
+        loss_res_old = loss_res
 
         snorm = rho * np.sqrt(
             squared_norm(dual_con_res[:, None, None] * nabla) + 
@@ -261,10 +327,11 @@ def taylor_prox_time_graphical_lasso(
                 "eps_pri: %.4f, eps_dual: %.4f" % check[:5])
 
         out_obj.append(penalty_objective(Z_0, Z_0[:-1], Z_0[1:], psi, theta))
-        if not iteration_ % 500:
+        if not iteration_ % 100:
             print(iteration_)
             print(out.fun, out.x)
             print(out_obj[-1])
+            # print(switch)
         checks.append(check)
 
         # if len(out_obj) > 10:
@@ -284,10 +351,43 @@ def taylor_prox_time_graphical_lasso(
         #     mu=1e2, tau_inc=1.01, tau_dec=1.01)
         #     # **(update_rho_options or {}))
         # # scaled dual variables should be also rescaled
-        # U_1 *= rho / rho_new
-        # U_2 *= rho / rho_new
-        # rho = rho_new
+        # if len(con_obj) > 50:
+        #     if switch <= 0 and (np.mean(con_obj[-50:-25]) < np.mean(con_obj[-25:])):
+        #     # if switch <= 0 and (con_obj[-2] < con_obj[-1]):
+        #         print("Rho Mult", 5 * rho, iteration_, con_obj[-1])
+        #         switch = 100
+        #         rho_new = 5 * rho
+        #         u *= rho / rho_new
+        #         U_1 *= rho / rho_new
+        #         U_2 *= rho / rho_new
+        #         rho = rho_new
+        #         # con_obj = []
+        #     # elif (con_obj[-2] < con_obj[-1]):
+        #     elif iteration_ < 0.5 * max_iter and np.mean(con_obj[-50:-25]) < np.mean(con_obj[-25:]) and con_obj[-1] > 5:
+        #         switch -= 1
+        #     # elif iteration_ > 0.5 * max_iter  and np.mean(con_obj[-50:-25]) < np.mean(con_obj[-25:]):
+        #     elif iteration_ > 0.5 * max_iter:
+        #         rho_new = 1e4 * rho
+        #         u *= rho / rho_new
+        #         U_1 *= rho / rho_new
+        #         U_2 *= rho / rho_new
+        #         rho = rho_new
+        #         con_obj = []
 
+        # if len(con_obj) > 200:
+        #     if switch >= 200 and (np.mean(con_obj[-50:-25]) > np.mean(con_obj[-25:])):
+        #     # if switch >= 200 and (con_obj[-2] > con_obj[-1]):
+        #         print("Rho Div", 1 / 2 * rho, iteration_, con_obj[-1])
+        #         switch = 100
+        #         rho_new = rho / 2
+        #         u *= rho / rho_new
+        #         U_1 *= rho / rho_new
+        #         U_2 *= rho / rho_new
+        #         rho = rho_new
+        #         con_obj = []
+        #     elif np.mean(con_obj[-50:-25]) > np.mean(con_obj[-25:]):
+        #     # elif (con_obj[-2] > con_obj[-1]):
+        #         switch += 1
     else:
         warnings.warn("Objective did not converge.")
 
