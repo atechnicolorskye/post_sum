@@ -140,8 +140,6 @@ def taylor_prox_time_graphical_lasso(
     T = S.shape[0]
     S_flat = S.copy().reshape(T, S.shape[1] * S.shape[2])
 
-    I = np.eye(S.shape[1] ** 2)
-
     Z_0 = K_init
     Z_0_flat = K_init.copy().reshape(T, S.shape[1] * S.shape[2])
     Z_1 = Z_0.copy()[:-1] 
@@ -186,13 +184,13 @@ def taylor_prox_time_graphical_lasso(
             # if np.max(loss_res_old) > 0:
                 # line_search = 1
             if loss_function.__name__ == 'neg_logl':
-                nabla = np.array([S_t - np.linalg.inv(Z_0_old_t).flatten() for (S_t, Z_0_old_t) in zip(S_flat, Z_0_old)])
+                nabla = np.array([S_t - np.linalg.inv(Z_0_old_t).ravel() for (S_t, Z_0_old_t) in zip(S_flat, Z_0_old)])
             # elif loss_function.__name__ == 'dtrace': 
             #     nabla = np.array([(2 * Z_0_old_t @ S_t - I) for (S_t, Z_0_old_t) in zip(S, Z_0_old)])
             g = loss_res_old + u
-            trace_nabla_Z_0_old = np.array([np.sum(nabla_t * Z_0_old_t.flatten()) for (nabla_t, Z_0_old_t) in zip(nabla, Z_0_old)])
+            trace_nabla_Z_0_old = np.array([nabla_t @ Z_0_old_t.ravel() for (nabla_t, Z_0_old_t) in zip(nabla, Z_0_old)])
             g -= trace_nabla_Z_0_old
-            trace_nabla_nabla =  np.sum(nabla * nabla, 1)
+            trace_nabla_nabla =  np.einsum('ij,ij->i', nabla, nabla)
             nabla_nabla_T = np.einsum('ij,ik->ijk', nabla, nabla)
             # else:
             #     line_search = 0
@@ -204,7 +202,7 @@ def taylor_prox_time_graphical_lasso(
         def _Z_0(x, i):
             Z_0_i = (A_p_i - x * nabla_nabla_T_i_A_p_i / (divisor[i] * rho + x * trace_nabla_nabla[i])).reshape(S.shape[1], S.shape[2])
             return soft_thresholding_od(0.5 * (Z_0_i + Z_0_i.transpose(1,0)) / divisor[i], lamda=theta / (rho * divisor[i]))
-
+            
         def _f(x, i, loss_function, S, _Z_0, C):
             return (loss_function(S[i], _Z_0(x, i)) - C[i]) ** 2
 
@@ -242,10 +240,10 @@ def taylor_prox_time_graphical_lasso(
                 rho=rho, tol=tol, rtol=rtol, max_iter=max_iter)
 
         # update residuals
-        # loss_res = loss_gen(loss_function, S, Z_0) - C
-        # loss_res_mask = loss_res > 0
-        # con_obj.append(np.mean((loss_res_mask * loss_res) ** 2))
-        con_obj.append(np.mean(loss_res) ** 2)
+        loss_res_over = loss_res > 0
+        loss_res_under = loss_res < 0
+        con_obj.append(np.mean((loss_res_over * loss_res) ** 2 - (loss_res_under * loss_res) ** 2))
+        # con_obj.append(np.mean(loss_res) ** 2)
         # Z_0_res = Z_0 - Z_0_old
         # for i in infeasible_indices:
             # u[i] += loss_res[i]
@@ -317,7 +315,7 @@ def taylor_prox_time_graphical_lasso(
         if check.rnorm <= check.e_pri and check.snorm <= check.e_dual:
             break
 
-        if len(con_obj) > 50:
+        if len(con_obj) > 100:
             if np.mean(con_obj[-50:-25]) < np.mean(con_obj[-25:]) and np.max(loss_res) > 2: # np.mean(loss_res) > 0.25:
                 print("Rho Mult", 2 * rho, iteration_, np.mean(loss_res))
                 # resscale scaled dual variables
