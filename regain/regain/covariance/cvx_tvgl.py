@@ -141,13 +141,13 @@ def cvx_inequality_time_graphical_lasso(
                                 (1 - theta) * cp.sum([cp.norm(K[t] - K[t-1], 'fro') for t in range(1, T)]))
     elif psi == 'l1':
         objective = cp.Minimize(theta * cp.sum([cp.norm(K[t] - cp.diag(cp.diag(K[t])), 1) for t in range(T)]) + 
-                                (1 - theta) * cp.sum([cp.norm1(K[t] - K[t-1], axis=1) for t in range(1, T)]))
+                                (1 - theta) * cp.sum([cp.sum(cp.norm1(K[t] - K[t-1], axis=1)) for t in range(1, T)]))
     elif psi == 'l2':
         objective = cp.Minimize(theta * cp.sum([cp.norm(K[t] - cp.diag(cp.diag(K[t])), 1) for t in range(T)]) + 
-                                (1 - theta) * cp.sum([cp.norm(K[t] - K[t-1], p=2, axis=1) for t in range(1, T)]))
+                                (1 - theta) * cp.sum([cp.sum(cp.norm(K[t] - K[t-1], p=2, axis=1)) for t in range(1, T)]))
     elif psi == 'linf':
         objective = cp.Minimize(theta * cp.sum([cp.norm(K[t] - cp.diag(cp.diag(K[t])), 1) for t in range(T)]) + 
-                                (1 - theta) * cp.sum([cp.norm_inf(K[t] - K[t-1], axis=1) for t in range(1, T)]))
+                                (1 - theta) * cp.sum([cp.sum(cp.norm_inf(K[t] - K[t-1], axis=1)) for t in range(1, T)]))
 
     # if loss_function == neg_logl:
     constraints = [(cp.sum(cp.multiply(K[t], S[t])) - cp.log_det(K[t]) <= C[t]) for t in range(T)]
@@ -165,7 +165,6 @@ def cvx_inequality_time_graphical_lasso(
 
     print(prob.status)
     print(prob.value)
-    # print(penalty_objective(Z_0, Z_0[:-1], Z_0[1:], psi, theta))
 
     K = np.array([k.value for k in K])
     covariance_ = np.array([linalg.pinvh(k) for k in K])
