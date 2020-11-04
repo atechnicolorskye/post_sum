@@ -139,13 +139,13 @@ def cvx_inequality_time_graphical_lasso(
     if psi == 'laplacian':
         objective = cp.Minimize(theta * cp.sum([cp.norm(K[t] - cp.diag(cp.diag(K[t])), 1) for t in range(T)]) + 
                                 (1 - theta) * cp.sum([cp.norm(K[t] - K[t-1], 'fro') for t in range(1, T)]))
-    elif psi = 'l1':
+    elif psi == 'l1':
         objective = cp.Minimize(theta * cp.sum([cp.norm(K[t] - cp.diag(cp.diag(K[t])), 1) for t in range(T)]) + 
                                 (1 - theta) * cp.sum([cp.norm1(K[t] - K[t-1], axis=1) for t in range(1, T)]))
-    elif psi = 'l2':
+    elif psi == 'l2':
         objective = cp.Minimize(theta * cp.sum([cp.norm(K[t] - cp.diag(cp.diag(K[t])), 1) for t in range(T)]) + 
                                 (1 - theta) * cp.sum([cp.norm(K[t] - K[t-1], p=2, axis=1) for t in range(1, T)]))
-    elif psi = 'linf':
+    elif psi == 'linf':
         objective = cp.Minimize(theta * cp.sum([cp.norm(K[t] - cp.diag(cp.diag(K[t])), 1) for t in range(T)]) + 
                                 (1 - theta) * cp.sum([cp.norm_inf(K[t] - K[t-1], axis=1) for t in range(1, T)]))
 

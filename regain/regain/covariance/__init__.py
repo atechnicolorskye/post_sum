@@ -32,5 +32,5 @@ from .latent_graphical_lasso_ import LatentGraphicalLasso
 from .time_graphical_lasso_ import TimeGraphicalLasso
 from .latent_time_graphical_lasso_ import LatentTimeGraphicalLasso
 from .inequality_time_graphical_lasso import InequalityTimeGraphicalLasso
-from .taylor_prox_time_graphical_lasso import TaylorProxTimeGraphicalLasso
+from .taylor_equal_time_graphical_lasso import TaylorEqualTimeGraphicalLasso
 from .cvx_tvgl import CVXInequalityTimeGraphicalLasso
