@@ -37,6 +37,7 @@ from __future__ import division
 from itertools import compress 
 
 import warnings
+import copy
 
 import numpy as np
 from scipy import linalg
@@ -45,23 +46,22 @@ from sklearn.covariance import empirical_covariance, log_likelihood
 from sklearn.utils.extmath import squared_norm
 from sklearn.utils.validation import check_X_y
 
-import cvxpy as cp
-
 from regain.covariance.graphical_lasso_ import (
-    GraphicalLasso, init_precision, neg_logl, dtrace)
+    GraphicalLasso, neg_logl, dtrace)
 from regain.norm import l1_od_norm
 from regain.prox import soft_thresholding_od
 from regain.update_rules import update_rho
 from regain.utils import convergence, error_norm_time
 from regain.validation import check_norm_prox
 
+from scipy.optimize import minimize_scalar
+from functools import partial
+
 import pdb
 
 def loss_gen(loss, S, K):
     T, p, _, = S.shape
-    losses = np.zeros((T))
-    for i in range(T):
-        losses[i] = loss(S[i],  K[i])
+    losses = np.array([loss(S[i], K[i]) for i in range(T)])
     return losses
 
 
@@ -70,14 +70,35 @@ def penalty_objective(Z_0, Z_1, Z_2, psi, theta):
     return theta * sum(map(l1_od_norm, Z_0)) + (1 - theta) * sum(map(psi, Z_2 - Z_1))
 
 
-def cvx_inequality_time_graphical_lasso(
-    S, K_init, max_iter, loss, C, theta, psi, gamma, tol
+def rbf_weights(T, bandwidth, mult):
+    """RBF Weights"""
+    weights = np.zeros((T, T))
+    for i in range(T):
+        time_diff = np.arange(-i, T-i)
+        weights[i] = np.exp(-time_diff ** 2 / bandwidth) * (mult - 1) + 1
+    return weights
+
+
+def lin_weights(T, bandwidth, mult):
+    """Linear Weights"""
+    weights = np.zeros((T, T))
+    for i in range(T):
+        time_diff = np.arange(-i, T-i)
+        weights[i] = np.exp(-np.abs(time_diff) / bandwidth) * (mult - 1) + 1
+    return weights
+
+
+def taylor_equal_time_graphical_lasso(
+    S, K_init, max_iter, loss, C, theta, rho, div, 
+    psi, gamma, tol, rtol, verbose, return_history, 
+    return_n_iter, mode, compute_objective, stop_at, 
+    stop_when, update_rho_options
     ):
-    """Inequality constrained time-varying graphical LASSO solver.
+    """Equality constrained time-varying graphical LASSO solver.
 
     Solves the following problem via ADMM:
         min sum_{i=1}^T ||K_i||_{od,1} + beta sum_{i=2}^T Psi(K_i - K_{i-1})
-        s.t. objective =< c_i for i = 1, ..., T
+        s.t. objective = c_i for i = 1, ..., T
 
     where S_i = (1/n_i) X_i^T X_i is the empirical covariance of data
     matrix X (training observations by features).
@@ -125,55 +146,242 @@ def cvx_inequality_time_graphical_lasso(
         for the primal and dual residual norms at each iteration.
 
     """
+    psi, prox_psi, psi_node_penalty = check_norm_prox(psi)
 
     if loss == 'LL':
         loss_function = neg_logl
     else:
         loss_function = dtrace
 
-    T, p, _ = S.shape
-    K = [cp.Variable(shape=(p, p), PSD=True) for t in range(T)]
-    # Z_1 = [cp.Variable(shape=(p, p), PSD=True) for t in range(T-1)]
-    # Z_2 = [cp.Variable(shape=(p, p), PSD=True) for t in range(T-1)]
+    T = S.shape[0]
+    S_flat = S.copy().reshape(T, S.shape[1] * S.shape[2])
+    I_flat = np.diagflat(S.shape[1]).ravel()
 
-    if psi == 'laplacian':
-        objective = cp.Minimize(theta * cp.sum([cp.norm(K[t] - cp.diag(cp.diag(K[t])), 1) for t in range(T)]) + 
-                                (1 - theta) * cp.sum([cp.norm(K[t] - K[t-1], 'fro') for t in range(1, T)]))
-    elif psi = 'l1':
-        objective = cp.Minimize(theta * cp.sum([cp.norm(K[t] - cp.diag(cp.diag(K[t])), 1) for t in range(T)]) + 
-                                (1 - theta) * cp.sum([cp.norm1(K[t] - K[t-1], axis=1) for t in range(1, T)]))
-    elif psi = 'l2':
-        objective = cp.Minimize(theta * cp.sum([cp.norm(K[t] - cp.diag(cp.diag(K[t])), 1) for t in range(T)]) + 
-                                (1 - theta) * cp.sum([cp.norm(K[t] - K[t-1], p=2, axis=1) for t in range(1, T)]))
-    elif psi = 'linf':
-        objective = cp.Minimize(theta * cp.sum([cp.norm(K[t] - cp.diag(cp.diag(K[t])), 1) for t in range(T)]) + 
-                                (1 - theta) * cp.sum([cp.norm_inf(K[t] - K[t-1], axis=1) for t in range(1, T)]))
+    K = K_init
+    Z_0 = K_init
+    Z_1 = Z_0.copy()[:-1] 
+    Z_2 = Z_0.copy()[1:]  
 
-    # if loss_function == neg_logl:
-    constraints = [(cp.sum(cp.multiply(K[t], S[t])) - cp.log_det(K[t]) <= C[t]) for t in range(T)]
-                    # [(cp.trace(K[t] @ S[t]) - cp.log_det(K[t]) <= C[t]) for t in range(T)] # + \
-                    # [(Z_1[t] == K[t]) for t in range(T-1)] + \
-                    # [(Z_2[t] == K[t+1]) for t in range(T-1)]
-    # else:
-    #     constraints = [(cp.trace(K[t] @ K[t] @ S[t]) - cp.trace(K[t]) <= C[t]) for t in range(T)] # + \
-    #                     # [(Z_1[t] == K[t]) for t in range(T-1)] + \
-    #                     # [(Z_2[t] == K[t+1]) for t in range(T-1)]
+    u = np.zeros(T)
+    U_0 = np.zeros_like(Z_0) 
+    U_1 = np.zeros_like(Z_1)
+    U_2 = np.zeros_like(Z_2)
 
-    prob = cp.Problem(objective, constraints)
-    # prob.solve(solver=cp.SCS, max_iters=np.int(max_iter), eps=tol, verbose=True)
-    prob.solve(solver=cp.MOSEK, verbose=True)
+    Z_0_old = Z_0.copy()
+    Z_1_old = np.zeros_like(Z_1)
+    Z_2_old = np.zeros_like(Z_2)
 
-    print(prob.status)
-    print(prob.value)
-    # print(penalty_objective(Z_0, Z_0[:-1], Z_0[1:], psi, theta))
+    # divisor for consensus variables, accounting for one less matrix for t = 0 and t = T
+    divisor = np.full(T, 3, dtype=float)
+    divisor[0] -= 1
+    divisor[-1] -= 1
 
-    K = np.array([k.value for k in K])
-    covariance_ = np.array([linalg.pinvh(k) for k in K])
-    return_list = [K, covariance_]
+    # rho = rho * np.ones(T)    
+    # weights = rbf_weights(T, 5, 1.1)
+
+    # con_obj = {}
+    # for t in range(T):
+    #     con_obj[t] = []
+    con_obj_mean = []
+    con_obj_max = []
+    out_obj = []
+
+    loss_res = np.zeros(T)
+
+    checks = [
+        convergence(
+            obj=penalty_objective(Z_0, Z_1, Z_2, psi, theta))
+    ]
+
+    loss_init = loss_gen(loss_function, S, Z_0_old)
+    loss_diff = C - loss_init
+
+    C_  = C - loss_diff
+
+    for iteration_ in range(max_iter):
+        if iteration_ == 0:
+            loss_res_old = -loss_diff
+            g = np.zeros(T)
+            nabla = np.zeros_like(Z_0_flat)
+            trace_nabla_Z_0_old =  g.copy()
+            trace_nabla_nabla = g.copy()
+        else:
+            if loss_function.__name__ == 'neg_logl':
+                nabla = np.array([S_t - np.linalg.inv(Z_0_old_t).ravel() for (S_t, Z_0_old_t) in zip(S_flat, Z_0_old)])
+            elif loss_function.__name__ == 'dtrace': 
+                nabla = np.array([(2 * Z_0_old_t.ravel() @ S_t - I) for (S_t, Z_0_old_t) in zip(S_flat, Z_0_old)])
+            trace_nabla_Z_0_old = np.array([nabla_t @ Z_0_old_t.ravel() for (nabla_t, Z_0_old_t) in zip(nabla, Z_0_old)])
+            g = trace_nabla_Z_0_old - loss_res_old - u
+            trace_nabla_nabla =  np.einsum('ij,ij->i', nabla, nabla)
+        
+        A_p = rho * (Z_0 - U_0)
+        # A_p[:-1] += rho[:-1, None, None] * (Z_1 - U_1)
+        # A_p[1:] += rho[1:, None, None] * (Z_2 - U_2)
+        A_p[:-1] += rho * (Z_1 - U_1)
+        A_p[1:] += rho * (Z_2 - U_2)
+
+        def _K(x, t):
+            # Z_0_t = (A_p_t + x * g[t] * nabla[t] - ((x * nabla_t_T_A_p_t + x ** 2 * g[t] * trace_nabla_nabla[t]) * nabla[t])  / (divisor[t] * rho[t] + x * trace_nabla_nabla[t])).reshape(S.shape[1], S.shape[2])
+            # return 0.5 * (Z_0_t + Z_0_t.transpose(1,0)) / (rho[t] * divisor[t])
+            Z_0_t = (A_p_t + x * g[t] * nabla[t] - ((x * nabla_t_T_A_p_t + x ** 2 * g[t] * trace_nabla_nabla[t]) * nabla[t])  / (divisor[t] * rho + x * trace_nabla_nabla[t])).reshape(S.shape[1], S.shape[2])
+            return 0.5 * (Z_0_t + Z_0_t.transpose(1,0)) / (rho * divisor[t])
+            
+
+        def _f(x, t, loss_function, S, _K, C):
+            return (loss_function(S[t], _Z_0(x, t)) - C[t]) ** 2
+
+        # update K
+        for t in range(T):
+            # K[t] = 0.5 * (A_p[t] + A_p[t].transpose(1,0)) / (rho[t] * divisor[t])
+            K[t] = 0.5 * (A_p[t] + A_p[t].transpose(1,0)) / (rho * divisor[t])
+            loss_res[t] = loss_function(S[t], Z_0[t]) - C[t]
+            # con_obj[t].append(loss_res[t])
+            if loss_res[t] > 0:
+                A_p_t = A_p[t].ravel()
+                nabla_t_T_A_p_t = nabla[t] @ A_p_t
+                out = minimize_scalar(partial(_f, t=t, loss_function=loss_function, S=S, _K=_K, C=C))
+                K[t] = _K(out.x, t)
+                loss_res[t] = loss_function(S[t], Z_0[t]) - C[t]
+                u[t] += loss_res[t]    
+                # con_obj[t][-1] = loss_res[t]
+                # if len(con_obj[t]) > 100 and np.mean(con_obj[t][-100:-50]) < np.mean(con_obj[t][-50:]) and loss_res[t] > 3:
+                #     if con_obj[t][-2] < con_obj[t][-1] and loss_res[t] > 3:
+                #         rho *= weights[t]
+                #         u /= weights[t]
+                #         U_1 /= weights[t][:-1, None, None]
+                #         U_2 /= weights[t][1:, None, None]
+                #         con_obj[t] = []
+                #         print(iteration_, t, rho[t])
+                
+        # update Z_0
+        A = K + U_0
+        A += A.transpose(0, 2, 1)
+        A /= 2.
+        Z_0 = soft_thresholding_od(A, lamda=alpha / rho)
+                
+        # other Zs
+        A_1 = Z_0[:-1] + U_1
+        A_2 = Z_0[1:] + U_2
+        if not psi_node_penalty:
+            # prox_e = prox_psi(A_2 - A_1, lamda=2. * (1 - theta) / rho[t])
+            # Z_1 = .5 * (A_1 + A_2 - prox_e)
+            # Z_2 = .5 * (A_1 + A_2 + prox_e)
+            prox_e = prox_psi(A_2 - A_1, lamda=2. * (1 - theta) / rho)
+            Z_1 = .5 * (A_1 + A_2 - prox_e)
+            Z_2 = .5 * (A_1 + A_2 + prox_e)
+        else:
+            # Z_1, Z_2 = prox_psi(
+            #     np.concatenate((A_1, A_2), axis=1), lamda=.5 * (1 - theta) / rho[t],
+            #     rho=rho[t], tol=tol, rtol=rtol, max_iter=max_iter)
+            Z_1, Z_2 = prox_psi(
+                np.concatenate((A_1, A_2), axis=1), lamda=.5 * (1 - theta) / rho,
+                rho=rho, tol=tol, rtol=rtol, max_iter=max_iter)
+
+        # update residuals
+        con_obj_mean.append(np.mean(loss_res) ** 2)
+        con_obj_max.append(np.max(loss_res))
+
+        U_0 += K - Z_0 
+        U_1 += K[:-1] - Z_1
+        U_2 += K[1:] - Z_2
+
+        # diagnostics, reporting, termination checks
+        rnorm = np.sqrt(
+            squared_norm(loss_res) + # squared_norm(Z_0_res) + 
+            squared_norm(Z_0[:-1] - Z_1) + squared_norm(Z_0[1:] - Z_2)
+            )
+
+        dual_con_res = loss_res - loss_res_old
+        dual_con_res += (trace_nabla_Z_0_old - np.array([np.sum(nabla_t * Z_0_t.flatten()) for (nabla_t, Z_0_t) in zip(nabla, Z_0)]))
+
+        loss_res_old = loss_res.copy()
+
+        snorm = rho * np.sqrt(
+            squared_norm(dual_con_res[:, None, None] * nabla) + squared_norm(Z_0 - Z_0_old)
+            # squared_norm((rho * dual_con_res)[:, None, None] * nabla) + 
+            squared_norm(Z_1 - Z_1_old) + squared_norm(Z_2 - Z_2_old)
+            )
+
+        obj = penalty_objective(Z_0, Z_1, Z_2, psi, theta)
+
+        check = convergence(
+            obj=obj,
+            rnorm=rnorm,
+            snorm=snorm,
+            e_pri=np.sqrt(loss_res.size + Z_0.size + 2 * Z_1.size) * tol + rtol * 
+                (
+                max(np.sqrt(squared_norm(loss_res + C)), np.sqrt(squared_norm(C))) + 
+                max(np.sqrt(squared_norm(Z_0)), np.sqrt(squared_norm(K))) +
+                max(np.sqrt(squared_norm(Z_1)), np.sqrt(squared_norm(K[:-1]))) + 
+                max(np.sqrt(squared_norm(Z_2)), np.sqrt(squared_norm(K[1:])))
+                ),
+            e_dual=np.sqrt(loss_res.size + Z_0.size + 2 * Z_1.size) * tol + rtol * rho * 
+            # e_dual=np.sqrt(loss_res.size + Z_0.size + 2 * Z_1.size) * tol + rtol * 
+                np.sqrt(
+                    # squared_norm(rho * u) +
+                    # squared_norm(rho[:-1, None, None] * U_1) + 
+                    # squared_norm(rho[1:, None, None] * U_2)
+                    squared_norm(u) +
+                    squared_norm(U_0) + 
+                    squared_norm(U_1) + 
+                    squared_norm(U_2)
+                 )
+        )
+
+        Z_0_old = Z_0.copy()
+        Z_1_old = Z_1.copy()
+        Z_2_old = Z_2.copy()
+
+        if verbose:
+            print(
+                "obj: %.4f, rnorm: %.4f, snorm: %.4f,"
+                "eps_pri: %.4f, eps_dual: %.4f" % check[:5])
+
+        out_obj.append(penalty_objective(Z_0, Z_0[:-1], Z_0[1:], psi, theta))
+        if not iteration_ % 100:
+            print(iteration_)
+            print(np.max(loss_res), np.mean(loss_res))
+            print(out_obj[-1])
+        checks.append(check)
+
+        if stop_at is not None:
+            if abs(check.obj - stop_at) / abs(stop_at) < stop_when:
+                break
+
+        if check.rnorm <= check.e_pri and check.snorm <= check.e_dual:
+            break
+
+        if len(con_obj_mean) > 100:
+            if np.mean(con_obj_mean[-100:-50]) < np.mean(con_obj_mean[-50:]) and np.max(loss_res) > 2:
+            # or np.mean(con_obj_max[-100:-50]) < np.mean(con_obj_max[-50:])) # np.mean(loss_res) > 0.25:
+                print("Rho Mult", 2 * rho, iteration_, np.mean(loss_res), con_obj_max[-1])
+                # loss_diff /= 5            
+                # C_ = C - loss_diff           
+                # resscale scaled dual variables
+                rho = div * rho
+                u /= div
+                U_1 /= div
+                U_2 /= div
+                con_obj_mean = []
+                con_obj_max = []
+    else:
+        warnings.warn("Objective did not converge.")
+
+    print(iteration_, out_obj[-1])
+    # print(out_obj)
+    print(check.rnorm, check.e_pri)
+    print(check.snorm, check.e_dual)
+
+    covariance_ = np.array([linalg.pinvh(x) for x in Z_0])
+    return_list = [Z_0, covariance_]
+    if return_history:
+        return_list.append(checks)
+    if return_n_iter:
+        return_list.append(iteration_ + 1)
     return return_list
 
 
-class CVXInequalityTimeGraphicalLasso(GraphicalLasso):
+class TaylorEqualTimeGraphicalLasso(GraphicalLasso):
     """Sparse inverse covariance estimation with an l1-penalized estimator.
 
     Parameters
@@ -243,27 +451,32 @@ class CVXInequalityTimeGraphicalLasso(GraphicalLasso):
 
     """
     def __init__(
-            self, max_iter=1000, loss='LL', c_level=None, theta=0.5, rho=1e1,
-            psi='laplacian', gamma=None, tol=1e-4, rtol=1e-4, mode='admm',   
-            verbose=False, assume_centered=False, return_history=False, 
-            update_rho_options=None, compute_objective=True, 
-            stop_at=None, stop_when=1e-4, suppress_warn_list=False, init='empirical'):
+            self, max_iter=1000, loss='LL', c_level=None, theta=0.5,
+            rho=1e2, div=2, psi='laplacian', gamma=None, tol=1e-4, rtol=1e-4, 
+            mode='admm', verbose=False, assume_centered=False, return_history=False, 
+            update_rho_options=None, compute_objective=True, stop_at=None, 
+            stop_when=1e-4, suppress_warn_list=False):
         super().__init__(
             alpha=1., rho=rho, tol=tol, rtol=rtol, max_iter=max_iter,
             verbose=verbose, assume_centered=assume_centered, mode=mode,
             update_rho_options=update_rho_options,
-            compute_objective=compute_objective, init=init)
+            compute_objective=compute_objective)
         self.max_iter = max_iter
         self.loss = loss
         self.c_level = c_level
         self.theta = theta
+        self.rho = rho
+        self.div = div
         self.psi = psi
         self.gamma = gamma
-        self.tol = tol
-        
+        self.return_history = return_history
+        self.stop_at = stop_at
+        self.stop_when = stop_when
+        self.suppress_warn_list = suppress_warn_list
+
 
     def get_observed_precision(self):
-        """Getter for the observed precision matrix.
+        """Get the observed precision matrix.
 
         Returns
         -------
@@ -283,10 +496,17 @@ class CVXInequalityTimeGraphicalLasso(GraphicalLasso):
             Empirical covariance of data.
 
         """
-        out = cvx_inequality_time_graphical_lasso(
+        out = taylor_equal_time_graphical_lasso(
               emp_cov, self.emp_inv, max_iter=self.max_iter, loss=self.loss, C=self.C, 
-              theta=self.theta, psi=self.psi, gamma=self.gamma, tol=self.tol)
-        self.precision_, self.covariance_ = out
+              theta=self.theta, rho=self.rho, div=self.div, # n_samples=self.n_samples, 
+              psi=self.psi, gamma=self.gamma, tol=self.tol, rtol=self.rtol, 
+              verbose=self.verbose, return_history=self.return_history, return_n_iter=True,  
+              mode=self.mode, compute_objective=self.compute_objective, stop_at=self.stop_at,
+              stop_when=self.stop_when, update_rho_options=self.update_rho_options, init=self.init)
+        if self.return_history:
+            self.precision_, self.covariance_, self.history_, self.n_iter_ = out
+        else:
+            self.precision_, self.covariance_, self.n_iter_ = out
         return self
 
 
@@ -322,6 +542,7 @@ class CVXInequalityTimeGraphicalLasso(GraphicalLasso):
         emp_inv_score = []
         sam_inv_score = []
 
+    
         for i in self.classes_:
             emp_cov_i = empirical_covariance(X[y == i], assume_centered=self.assume_centered)
             emp_inv_i = np.linalg.inv(emp_cov_i)
@@ -414,42 +635,6 @@ class CVXInequalityTimeGraphicalLasso(GraphicalLasso):
                 test_cov, self.get_observed_precision(), self.classes_))
 
         return res
-
-
-    def error_norm(
-            self, comp_cov, norm='frobenius', scaling=True, squared=True):
-        """Compute the Mean Squared Error between two covariance estimators.
-        (In the sense of the Frobenius norm).
-
-        Parameters
-        ----------
-        comp_cov : array-like, shape = [n_features, n_features]
-            The covariance to compare with.
-
-        norm : str
-            The type of norm used to compute the error. Available error types:
-            - 'frobenius' (default): sqrt(tr(A^t.A))
-            - 'spectral': sqrt(max(eigenvalues(A^t.A))
-            where A is the error ``(comp_cov - self.covariance_)``.
-
-        scaling : bool
-            If True (default), the squared error norm is divided by n_features.
-            If False, the squared error norm is not rescaled.
-
-        squared : bool
-            Whether to compute the squared error norm or the error norm.
-            If True (default), the squared error norm is returned.
-            If False, the error norm is returned.
-
-        Returns
-        -------
-        The Mean Squared Error (in the sense of the Frobenius norm) between
-        `self` and `comp_cov` covariance estimators.
-
-        """
-        return error_norm_time(
-            self.covariance_, comp_cov, norm=norm, scaling=scaling,
-            squared=squared)
 
 
     def eval_obs_pre(self, X, y):

@@ -61,6 +61,7 @@ def node_penalty(X):
             np.random.randn(X.size), constraints=cons).fun
     except ValueError:
         res = np.nan
+    return res
 
 def kernel_weighted_penalty(weights, emp_cov, Z_1):
     """Kernel weighted penalty. See Song et. al for details."""

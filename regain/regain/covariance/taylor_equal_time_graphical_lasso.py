@@ -79,7 +79,7 @@ def rbf_weights(T, bandwidth, mult):
     return weights
 
 
-def linear_weights(T, bandwidth, mult):
+def lin_weights(T, bandwidth, mult):
     """Linear Weights"""
     weights = np.zeros((T, T))
     for i in range(T):
@@ -88,17 +88,17 @@ def linear_weights(T, bandwidth, mult):
     return weights
 
 
-def taylor_prox_time_graphical_lasso(
-    S, K_init, max_iter, loss, C, theta,
-    rho, div, psi, gamma, tol, rtol, verbose, return_history, 
+def taylor_equal_time_graphical_lasso(
+    S, K_init, max_iter, loss, C, theta, rho, div, 
+    psi, gamma, tol, rtol, verbose, return_history, 
     return_n_iter, mode, compute_objective, stop_at, 
-    stop_when, update_rho_options, init
+    stop_when, update_rho_options
     ):
-    """Inequality constrained time-varying graphical LASSO solver.
+    """Equality constrained time-varying graphical LASSO solver.
 
     Solves the following problem via ADMM:
         min sum_{i=1}^T ||K_i||_{od,1} + beta sum_{i=2}^T Psi(K_i - K_{i-1})
-        s.t. objective =< c_i for i = 1, ..., T
+        s.t. objective = c_i for i = 1, ..., T
 
     where S_i = (1/n_i) X_i^T X_i is the empirical covariance of data
     matrix X (training observations by features).
@@ -148,8 +148,6 @@ def taylor_prox_time_graphical_lasso(
     """
     psi, prox_psi, psi_node_penalty = check_norm_prox(psi)
 
-    psi_name = psi.__name__
-
     if loss == 'LL':
         loss_function = neg_logl
     else:
@@ -157,6 +155,7 @@ def taylor_prox_time_graphical_lasso(
 
     T = S.shape[0]
     S_flat = S.copy().reshape(T, S.shape[1] * S.shape[2])
+    I_flat = np.diagflat(S.shape[1]).ravel()
 
     Z_0 = K_init
     Z_0_flat = K_init.copy().reshape(T, S.shape[1] * S.shape[2])
@@ -173,18 +172,16 @@ def taylor_prox_time_graphical_lasso(
     Z_2_old = np.zeros_like(Z_2)
 
     # divisor for consensus variables, accounting for one less matrix for t = 0 and t = T
-    # divisor = np.full(T, 3, dtype=float)
     divisor = np.full(T, 2, dtype=float)
     divisor[0] -= 1
     divisor[-1] -= 1
 
-    rho = rho * np.ones(T)
+    # rho = rho * np.ones(T)    
+    # weights = rbf_weights(T, 5, 1.1)
 
-    weights = rbf_weights(T, 10, 1.1)
-
-    con_obj = {}
-    for t in range(T):
-        con_obj[t] = []
+    # con_obj = {}
+    # for t in range(T):
+    #     con_obj[t] = []
     con_obj_mean = []
     con_obj_max = []
     out_obj = []
@@ -204,7 +201,6 @@ def taylor_prox_time_graphical_lasso(
     for iteration_ in range(max_iter):
         if iteration_ == 0:
             loss_res_old = -loss_diff
-            print(loss_res_old)
             g = np.zeros(T)
             nabla = np.zeros_like(Z_0_flat)
             trace_nabla_Z_0_old =  g.copy()
@@ -212,129 +208,69 @@ def taylor_prox_time_graphical_lasso(
         else:
             if loss_function.__name__ == 'neg_logl':
                 nabla = np.array([S_t - np.linalg.inv(Z_0_old_t).ravel() for (S_t, Z_0_old_t) in zip(S_flat, Z_0_old)])
-            # elif loss_function.__name__ == 'dtrace': 
-            #     nabla = np.array([(2 * Z_0_old_t @ S_t - I) for (S_t, Z_0_old_t) in zip(S, Z_0_old)])
+            elif loss_function.__name__ == 'dtrace': 
+                nabla = np.array([(2 * Z_0_old_t.ravel() @ S_t - I) for (S_t, Z_0_old_t) in zip(S_flat, Z_0_old)])
             trace_nabla_Z_0_old = np.array([nabla_t @ Z_0_old_t.ravel() for (nabla_t, Z_0_old_t) in zip(nabla, Z_0_old)])
             g = trace_nabla_Z_0_old - loss_res_old - u
             trace_nabla_nabla =  np.einsum('ij,ij->i', nabla, nabla)
-            sum_nabla = np.einsum('ij->i', nabla)
-
-        # Benning et. al
-        A_p = np.zeros_like(Z_0_old)
-        A_p[:-1] += Z_1 - U_1
-        A_p[1:] += Z_2 - U_2
+        
+        A_p = Z_0_old
+        # A_p[:-1] += rho[:-1, None, None] * (Z_1 - U_1)
+        # A_p[1:] += rho[1:, None, None] * (Z_2 - U_2)
+        A_p[:-1] += rho * (Z_1 - U_1)
+        A_p[1:] += rho * (Z_2 - U_2)
 
         def _Z_0(x, t):
-            A_t = ((rho[t] * A_p[t]).ravel() + x * (g[t] - trace_nabla_Z_0_old[t]) * nabla[t]).reshape(S.shape[1], S.shape[2])
-            return soft_thresholding_od(0.5 * (A_t + A_t.transpose(1,0)) / (rho[t] * (divisor[t] + 1)), lamda=theta / (rho[t] * (divisor[t] + 1)))
-        
+            # Z_0_t = (A_p_t + x * g[t] * nabla[t] - ((x * nabla_t_T_A_p_t + x ** 2 * g[t] * trace_nabla_nabla[t]) * nabla[t])  / (divisor[t] * rho[t] + 1 + x * trace_nabla_nabla[t])).reshape(S.shape[1], S.shape[2])
+            # return soft_thresholding_od(0.5 * (Z_0_t + Z_0_t.transpose(1,0)) / (rho[t] * divisor[t] + 1), lamda=theta / (rho[t] * divisor[t] + 1))
+            Z_0_t = (A_p_t + x * g[t] * nabla[t] - ((x * nabla_t_T_A_p_t + x ** 2 * g[t] * trace_nabla_nabla[t]) * nabla[t])  / (divisor[t] * rho + 1 + x * trace_nabla_nabla[t])).reshape(S.shape[1], S.shape[2])
+            return soft_thresholding_od(0.5 * (Z_0_t + Z_0_t.transpose(1,0)) / (rho * divisor[t] + 1), lamda=theta / (rho * divisor[t] + 1))
+            
+
         def _f(x, t, loss_function, S, _Z_0, C):
             return (loss_function(S[t], _Z_0(x, t)) - C[t]) ** 2
 
+        
         for t in range(T):
-            # A_t = Z_0_old[t] + A_p[t]
-            Z_0[t] = soft_thresholding_od(0.5 * (A_p[t] + A_p[t].transpose(1,0)) / divisor[t], lamda=theta / (rho[t] * divisor[t]))
+            # Z_0[t] = soft_thresholding_od(0.5 * (A_p[t] + A_p[t].transpose(1,0)) / (rho[t] * divisor[t] + 1), lamda=theta / (rho[t] * divisor[t] + 1))
+            Z_0[t] = soft_thresholding_od(0.5 * (A_p[t] + A_p[t].transpose(1,0)) / (rho * divisor[t] + 1), lamda=theta / (rho * divisor[t] + 1))
             loss_res[t] = loss_function(S[t], Z_0[t]) - C[t]
-            con_obj[t].append(loss_res[t])
+            # con_obj[t].append(loss_res[t])
             if loss_res[t] > 0:
-                gamma_t = rho[t] * np.sum(A_p[t]) / ((g[t] - trace_nabla_Z_0_old[t]) * sum_nabla[t])
-                print(iteration_, t, gamma_t) 
-                A_t = ((rho[t] * A_p[t]).ravel() + gamma_t * (g[t] - trace_nabla_Z_0_old[t]) * nabla[t]).reshape(S.shape[1], S.shape[2])
-                # out = minimize_scalar(partial(_f, t=t, loss_function=loss_function, S=S, _Z_0=_Z_0, C=C))
-                # Z_0[t] = _Z_0(out.x, t)
-                Z_0[t] = soft_thresholding_od(0.5 * (A_t + A_t.transpose(1,0)) / (rho[t] * divisor[t]), lamda=theta / (rho[t] * divisor[t]))
+                A_p_t = A_p[t].ravel()
+                nabla_t_T_A_p_t = nabla[t] @ A_p_t
+                out = minimize_scalar(partial(_f, t=t, loss_function=loss_function, S=S, _Z_0=_Z_0, C=C))
+                Z_0[t] = _Z_0(out.x, t)
                 loss_res[t] = loss_function(S[t], Z_0[t]) - C[t]
-                print(con_obj[t][-1], loss_res[t])
-                con_obj[t][-1] = loss_res[t]
-
-                # if con_obj[t][-2] < con_obj[t][-1] and loss_res[t] > 3:
-                # if len(con_obj[t]) > 50 and np.mean(con_obj[t][-50:-25]) < np.mean(con_obj[t][-25:]) and loss_res[t] > 3:
-                #     rho *= weights[t]
-                #     u /= weights[t]
-                #     U_1 /= weights[t][:-1, None, None]
-                #     U_2 /= weights[t][1:, None, None]
-                #     con_obj[t] = []
-                #     print(iteration_, t, rho[t])
-
-
-        
-        # A_p = Z_0_old
-        # # A_p[:-1] += Z_1 - U_1
-        # # A_p[1:] += Z_2 - U_2
-        # A_p[:-1] += rho[:-1, None, None] * (Z_1 - U_1)
-        # A_p[1:] += rho[1:, None, None] * (Z_2 - U_2)
-        # # A_p[:-1] += rho * (Z_1 - U_1)
-        # # A_p[1:] += rho * (Z_2 - U_2)
-
-        # def _Z_0(x, t):
-        #     Z_0_t = (A_p_t + x * g[t] * nabla[t] - ((x * nabla_T_t_A_p_t + x ** 2 * g[t] * trace_nabla_nabla[t]) * nabla[t])  / (divisor[t] * rho[t] + 1 + x * trace_nabla_nabla[t])).reshape(S.shape[1], S.shape[2])
-        #     return soft_thresholding_od(0.5 * (Z_0_t + Z_0_t.transpose(1,0)) / (rho[t] * divisor[t] + 1), lamda=theta / (rho[t] * divisor[t] + 1))
-        #     # Z_0_t = (A_p_t + x * g[t] * nabla[t] - ((x * nabla_T_t_A_p_t + x ** 2 * g[t] * trace_nabla_nabla[t]) * nabla[t])  / (divisor[t] * rho + 1 + x * trace_nabla_nabla[t])).reshape(S.shape[1], S.shape[2])
-        #     # return soft_thresholding_od(0.5 * (Z_0_t + Z_0_t.transpose(1,0)) / (rho * divisor[t] + 1), lamda=theta / (rho * divisor[t] + 1))
-            
-        # def _f(x, t, loss_function, S, _Z_0, C):
-        #     return (loss_function(S[t], _Z_0(x, t)) - C[t]) ** 2
-
-        # out = minimize_scalar(_f, bounds=(-1., 1.), method='bounded')    
-        
-        # for t in range(T):
-        #     # Z_0[t] = soft_thresholding_od(0.5 * (A_p[t] + A_p[t].transpose(1,0)) / (rho[t] * divisor[t] + 1), lamda=theta / (rho[t] * divisor[t] + 1))
-        #     # Z_0[t] = soft_thresholding_od(0.5 * (A_p[t] + A_p[t].transpose(1,0)) / (rho * divisor[t] + 1), lamda=theta / (rho * divisor[t] + 1))
-            
-        #     # # Benning et al.
-        #     # A_t = Z_0[t] + A_p[t]
-        #     # Z_0[t] = soft_thresholding_od(0.5 * (A_t + A_t.transpose(1,0)) / (rho[t] * divisor[t] + 1), lamda=theta / (rho[t] * divisor[t] + 1))
-
-        #     # loss_res[t] = loss_function(S[t], Z_0[t]) - C[t]
-        #     # con_obj[t].append(loss_res[t])
-        #     # if loss_res[t] > 0:
-
-        #     #     # A_p_t = A_p[t].ravel()
-        #     #     # nabla_T_t_A_p_t = nabla[t] @ A_p_t
-        #     #     # out = minimize_scalar(partial(_f, t=t, loss_function=loss_function, S=S, _Z_0=_Z_0, C=C))
-        #     #     # Z_0[t] = _Z_0(out.x, t)
-                
-        #     # Benning et al.
-        #     if iteration_ == 0:
-        #         gamma_t = 0
-        #     else:
-        #         gamma_t = 1 / (rho[t] * trace_nabla_nabla[t])
-        #     A_t = (rho[t] * (Z_0[t] + A_p[t]).ravel() + gamma_t * (g[t] - trace_nabla_Z_0_old[t]) * nabla[t]).reshape(S.shape[1], S.shape[2])
-        #     Z_0[t] = soft_thresholding_od(0.5 * (A_t + A_t.transpose(1,0)) / (rho[t] * divisor[t]), lamda=theta / (rho[t] * divisor[t]))
-
-        #     loss_res[t] = loss_function(S[t], Z_0[t]) - C[t]
-        #     u[t] += loss_res[t]    
-        #     # con_obj[t][-1] = loss_res[t]
-        #     con_obj[t].append(loss_res[t])
-
-        #     # if len(con_obj[t]) > 100 and np.mean(con_obj[t][-100:-50]) < np.mean(con_obj[t][-50:]) and loss_res[t] > 3:
-        #     if iteration_ > 0:
-        #         if con_obj[t][-2] < con_obj[t][-1] and loss_res[t] > 3:
-        #             rho *= weights[t]
-        #             u /= weights[t]
-        #             U_1 /= weights[t][:-1, None, None]
-        #             U_2 /= weights[t][1:, None, None]
-        #         # con_obj[t] = []
-        #         # print(iteration_, t) #, rho)
+                u[t] += loss_res[t]    
+                # con_obj[t][-1] = loss_res[t]
+                # if len(con_obj[t]) > 100 and np.mean(con_obj[t][-100:-50]) < np.mean(con_obj[t][-50:]) and loss_res[t] > 3:
+                #     if con_obj[t][-2] < con_obj[t][-1] and loss_res[t] > 3:
+                #         rho *= weights[t]
+                #         u /= weights[t]
+                #         U_1 /= weights[t][:-1, None, None]
+                #         U_2 /= weights[t][1:, None, None]
+                #         con_obj[t] = []
+                #         print(iteration_, t, rho[t])
                 
                 
         # other Zs
         A_1 = Z_0[:-1] + U_1
         A_2 = Z_0[1:] + U_2
         if not psi_node_penalty:
-            prox_e = prox_psi(A_2 - A_1, lamda=2. * (1 - theta) / rho[t])
-            Z_1 = .5 * (A_1 + A_2 - prox_e)
-            Z_2 = .5 * (A_1 + A_2 + prox_e)
-            # prox_e = prox_psi(A_2 - A_1, lamda=2. * (1 - theta) / rho)
+            # prox_e = prox_psi(A_2 - A_1, lamda=2. * (1 - theta) / rho[t])
             # Z_1 = .5 * (A_1 + A_2 - prox_e)
             # Z_2 = .5 * (A_1 + A_2 + prox_e)
+            prox_e = prox_psi(A_2 - A_1, lamda=2. * (1 - theta) / rho)
+            Z_1 = .5 * (A_1 + A_2 - prox_e)
+            Z_2 = .5 * (A_1 + A_2 + prox_e)
         else:
-            Z_1, Z_2 = prox_psi(
-                np.concatenate((A_1, A_2), axis=1), lamda=.5 * (1 - theta) / rho[t],
-                rho=rho[t], tol=tol, rtol=rtol, max_iter=max_iter)
             # Z_1, Z_2 = prox_psi(
-            #     np.concatenate((A_1, A_2), axis=1), lamda=.5 * (1 - theta) / rho,
-            #     rho=rho, tol=tol, rtol=rtol, max_iter=max_iter)
+            #     np.concatenate((A_1, A_2), axis=1), lamda=.5 * (1 - theta) / rho[t],
+            #     rho=rho[t], tol=tol, rtol=rtol, max_iter=max_iter)
+            Z_1, Z_2 = prox_psi(
+                np.concatenate((A_1, A_2), axis=1), lamda=.5 * (1 - theta) / rho,
+                rho=rho, tol=tol, rtol=rtol, max_iter=max_iter)
 
         # update residuals
         con_obj_mean.append(np.mean(loss_res) ** 2)
@@ -357,10 +293,10 @@ def taylor_prox_time_graphical_lasso(
         loss_res_old = loss_res.copy()
 
         snorm = rho * np.sqrt(
-            squared_norm((rho * dual_con_res)[:, None, None] * nabla) + 
-            squared_norm(rho[:-1, None, None] * (Z_1 - Z_1_old)) + squared_norm(rho[1:, None, None] * (Z_2 - Z_2_old))
-            # squared_norm(dual_con_res[:, None, None] * nabla) + 
-            # squared_norm(Z_1 - Z_1_old) + squared_norm(Z_2 - Z_2_old)
+            # squared_norm((rho * dual_con_res)[:, None, None] * nabla) + 
+            # squared_norm(rho[:-1, None, None] * (Z_1 - Z_1_old)) + squared_norm(rho[1:, None, None] * (Z_2 - Z_2_old))
+            squared_norm(dual_con_res[:, None, None] * nabla) + 
+            squared_norm(Z_1 - Z_1_old) + squared_norm(Z_2 - Z_2_old)
             )
 
         obj = penalty_objective(Z_0, Z_1, Z_2, psi, theta)
@@ -378,13 +314,14 @@ def taylor_prox_time_graphical_lasso(
                 max(np.sqrt(squared_norm(Z_2)), np.sqrt(squared_norm(Z_0[1:])))
                 ),
             e_dual=np.sqrt(loss_res.size + 2 * Z_1.size) * tol + rtol * rho * 
+            # e_dual=np.sqrt(loss_res.size + 2 * Z_1.size) * tol + rtol * 
                 np.sqrt(
-                    squared_norm(rho * u) +
-                    squared_norm(rho[:-1, None, None] * U_1) + 
-                    squared_norm(rho[1:, None, None] * U_2)
-                    # squared_norm(u) +
-                    # squared_norm(U_1) + 
-                    # squared_norm(U_2)
+                    # squared_norm(rho * u) +
+                    # squared_norm(rho[:-1, None, None] * U_1) + 
+                    # squared_norm(rho[1:, None, None] * U_2)
+                    squared_norm(u) +
+                    squared_norm(U_1) + 
+                    squared_norm(U_2)
                  )
         )
 
@@ -398,33 +335,32 @@ def taylor_prox_time_graphical_lasso(
                 "eps_pri: %.4f, eps_dual: %.4f" % check[:5])
 
         out_obj.append(penalty_objective(Z_0, Z_0[:-1], Z_0[1:], psi, theta))
-        # if not iteration_ % 100:
-        print(iteration_)
-        print(np.max(loss_res), np.mean(loss_res))
-        print(out_obj[-1])
+        if not iteration_ % 100:
+            print(iteration_)
+            print(np.max(loss_res), np.mean(loss_res))
+            print(out_obj[-1])
         checks.append(check)
 
         if stop_at is not None:
             if abs(check.obj - stop_at) / abs(stop_at) < stop_when:
                 break
 
-        # if check.rnorm <= check.e_pri and check.snorm <= check.e_dual:
-            # break
+        if check.rnorm <= check.e_pri and check.snorm <= check.e_dual:
+            break
 
-        # if len(con_obj_mean) > 100:
-        #     if np.mean(con_obj_mean[-100:-50]) < np.mean(con_obj_mean[-50:]) and np.max(loss_res) > 5:
-        #     # or np.mean(con_obj_max[-100:-50]) < np.mean(con_obj_max[-50:])) # np.mean(loss_res) > 0.25:
-        #         print("Rho Mult", 3 * rho, iteration_, np.mean(loss_res), con_obj_max[-1])
-        #         loss_diff /= 2            
-        #         C_ = C - loss_diff           
-        #         # resscale scaled dual variables
-        #         rho_new = 3 * rho
-        #         u *= rho / rho_new
-        #         U_1 *= rho / rho_new
-        #         U_2 *= rho / rho_new
-        #         rho = rho_new
-        #         con_obj_mean = []
-        #         con_obj_max = []
+        if len(con_obj_mean) > 100:
+            if np.mean(con_obj_mean[-100:-50]) < np.mean(con_obj_mean[-50:]) and np.max(loss_res) > 3:
+            # or np.mean(con_obj_max[-100:-50]) < np.mean(con_obj_max[-50:])) # np.mean(loss_res) > 0.25:
+                print("Rho Mult", 2 * rho, iteration_, np.mean(loss_res), con_obj_max[-1])
+                # loss_diff /= 5            
+                # C_ = C - loss_diff           
+                # resscale scaled dual variables
+                rho = div * rho
+                u /= div
+                U_1 /= div
+                U_2 /= div
+                con_obj_mean = []
+                con_obj_max = []
     else:
         warnings.warn("Objective did not converge.")
 
@@ -442,7 +378,7 @@ def taylor_prox_time_graphical_lasso(
     return return_list
 
 
-class TaylorProxTimeGraphicalLasso(GraphicalLasso):
+class TaylorEqualTimeGraphicalLasso(GraphicalLasso):
     """Sparse inverse covariance estimation with an l1-penalized estimator.
 
     Parameters
@@ -516,12 +452,12 @@ class TaylorProxTimeGraphicalLasso(GraphicalLasso):
             rho=1e2, div=2, psi='laplacian', gamma=None, tol=1e-4, rtol=1e-4, 
             mode='admm', verbose=False, assume_centered=False, return_history=False, 
             update_rho_options=None, compute_objective=True, stop_at=None, 
-            stop_when=1e-4, suppress_warn_list=False, init='empirical'):
+            stop_when=1e-4, suppress_warn_list=False):
         super().__init__(
             alpha=1., rho=rho, tol=tol, rtol=rtol, max_iter=max_iter,
             verbose=verbose, assume_centered=assume_centered, mode=mode,
             update_rho_options=update_rho_options,
-            compute_objective=compute_objective, init=init)
+            compute_objective=compute_objective)
         self.max_iter = max_iter
         self.loss = loss
         self.c_level = c_level
@@ -537,7 +473,7 @@ class TaylorProxTimeGraphicalLasso(GraphicalLasso):
 
 
     def get_observed_precision(self):
-        """Getter for the observed precision matrix.
+        """Get the observed precision matrix.
 
         Returns
         -------
@@ -557,7 +493,7 @@ class TaylorProxTimeGraphicalLasso(GraphicalLasso):
             Empirical covariance of data.
 
         """
-        out = taylor_prox_time_graphical_lasso(
+        out = taylor_equal_time_graphical_lasso(
               emp_cov, self.emp_inv, max_iter=self.max_iter, loss=self.loss, C=self.C, 
               theta=self.theta, rho=self.rho, div=self.div, # n_samples=self.n_samples, 
               psi=self.psi, gamma=self.gamma, tol=self.tol, rtol=self.rtol, 
@@ -696,42 +632,6 @@ class TaylorProxTimeGraphicalLasso(GraphicalLasso):
                 test_cov, self.get_observed_precision(), self.classes_))
 
         return res
-
-
-    def error_norm(
-            self, comp_cov, norm='frobenius', scaling=True, squared=True):
-        """Compute the Mean Squared Error between two covariance estimators.
-        (In the sense of the Frobenius norm).
-
-        Parameters
-        ----------
-        comp_cov : array-like, shape = [n_features, n_features]
-            The covariance to compare with.
-
-        norm : str
-            The type of norm used to compute the error. Available error types:
-            - 'frobenius' (default): sqrt(tr(A^t.A))
-            - 'spectral': sqrt(max(eigenvalues(A^t.A))
-            where A is the error ``(comp_cov - self.covariance_)``.
-
-        scaling : bool
-            If True (default), the squared error norm is divided by n_features.
-            If False, the squared error norm is not rescaled.
-
-        squared : bool
-            Whether to compute the squared error norm or the error norm.
-            If True (default), the squared error norm is returned.
-            If False, the error norm is returned.
-
-        Returns
-        -------
-        The Mean Squared Error (in the sense of the Frobenius norm) between
-        `self` and `comp_cov` covariance estimators.
-
-        """
-        return error_norm_time(
-            self.covariance_, comp_cov, norm=norm, scaling=scaling,
-            squared=squared)
 
 
     def eval_obs_pre(self, X, y):
