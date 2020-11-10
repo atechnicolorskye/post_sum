@@ -65,9 +65,9 @@ def loss_gen(loss, S, K):
     return losses
 
 
-def penalty_objective(Z_0, Z_1, Z_2, psi, theta):
-    """Penalty-only objective function for time-varying graphical LASSO."""
-    return theta * sum(map(l1_od_norm, Z_0)) + (1 - theta) * sum(map(psi, Z_2 - Z_1))
+def objective(loss_res, Z_0, Z_1, Z_2, psi, theta):
+    """Objective function for time-varying graphical LASSO."""
+    return sum(loss_res ** 2) + theta * sum(map(l1_od_norm, Z_0)) + (1 - theta) * sum(map(psi, Z_2 - Z_1))
 
 
 def rbf_weights(T, bandwidth, mult):
@@ -88,7 +88,7 @@ def lin_weights(T, bandwidth, mult):
     return weights
 
 
-def taylor_equal_time_graphical_lasso(
+def taylor_time_graphical_lasso(
     S, K_init, max_iter, loss, C, theta, rho, div, 
     psi, gamma, tol, rtol, verbose, return_history, 
     return_n_iter, mode, compute_objective, stop_at, 
@@ -190,27 +190,27 @@ def taylor_equal_time_graphical_lasso(
 
     checks = [
         convergence(
-            obj=penalty_objective(Z_0, Z_1, Z_2, psi, theta))
+            obj=objective(loss_res, Z_0, Z_1, Z_2, psi, theta))
     ]
 
     loss_init = loss_gen(loss_function, S, Z_0_old)
     loss_diff = C - loss_init
 
-    C_  = C - loss_diff
+    C_  = C - loss_diff / 2
 
     for iteration_ in range(max_iter):
         if iteration_ == 0:
             loss_res_old = -loss_diff
             g = np.zeros(T)
-            nabla = np.zeros_like(Z_0_flat)
+            nabla = np.zeros_like(S_flat)
             trace_nabla_Z_0_old =  g.copy()
             trace_nabla_nabla = g.copy()
         else:
             if loss_function.__name__ == 'neg_logl':
-                nabla = np.array([S_t - np.linalg.inv(Z_0_old_t).ravel() for (S_t, Z_0_old_t) in zip(S_flat, Z_0_old)])
+                nabla = np.array([S_t - np.linalg.inv(K_t).ravel() for (S_t, K_t) in zip(S_flat, K)])
             elif loss_function.__name__ == 'dtrace': 
-                nabla = np.array([(2 * Z_0_old_t.ravel() @ S_t - I) for (S_t, Z_0_old_t) in zip(S_flat, Z_0_old)])
-            trace_nabla_Z_0_old = np.array([nabla_t @ Z_0_old_t.ravel() for (nabla_t, Z_0_old_t) in zip(nabla, Z_0_old)])
+                nabla = np.array([(2 * K_t.ravel() @ S_t - I) for (S_t, K_t) in zip(S_flat, K)])
+            trace_nabla_Z_0_old = np.array([nabla_t @ K_t.ravel() for (nabla_t, K_t) in zip(nabla, K)])
             g = trace_nabla_Z_0_old - loss_res_old - u
             trace_nabla_nabla =  np.einsum('ij,ij->i', nabla, nabla)
         
@@ -223,25 +223,25 @@ def taylor_equal_time_graphical_lasso(
         def _K(x, t):
             # Z_0_t = (A_p_t + x * g[t] * nabla[t] - ((x * nabla_t_T_A_p_t + x ** 2 * g[t] * trace_nabla_nabla[t]) * nabla[t])  / (divisor[t] * rho[t] + x * trace_nabla_nabla[t])).reshape(S.shape[1], S.shape[2])
             # return 0.5 * (Z_0_t + Z_0_t.transpose(1,0)) / (rho[t] * divisor[t])
-            Z_0_t = (A_p_t + x * g[t] * nabla[t] - ((x * nabla_t_T_A_p_t + x ** 2 * g[t] * trace_nabla_nabla[t]) * nabla[t])  / (divisor[t] * rho + x * trace_nabla_nabla[t])).reshape(S.shape[1], S.shape[2])
-            return 0.5 * (Z_0_t + Z_0_t.transpose(1,0)) / (rho * divisor[t])
+            K_t = (A_p_t + x * g[t] * nabla[t] - ((x * nabla_t_T_A_p_t + x ** 2 * g[t] * trace_nabla_nabla[t]) * nabla[t])  / (divisor[t] * rho + x * trace_nabla_nabla[t])).reshape(S.shape[1], S.shape[2])
+            return 0.5 * (K_t + K_t.transpose(1,0)) / (rho * divisor[t])
             
 
         def _f(x, t, loss_function, S, _K, C):
-            return (loss_function(S[t], _Z_0(x, t)) - C[t]) ** 2
+            return (loss_function(S[t], _K(x, t)) - C[t]) ** 2
 
         # update K
         for t in range(T):
             # K[t] = 0.5 * (A_p[t] + A_p[t].transpose(1,0)) / (rho[t] * divisor[t])
             K[t] = 0.5 * (A_p[t] + A_p[t].transpose(1,0)) / (rho * divisor[t])
-            loss_res[t] = loss_function(S[t], Z_0[t]) - C[t]
+            loss_res[t] = loss_function(S[t], K[t]) - C[t]
             # con_obj[t].append(loss_res[t])
             if loss_res[t] > 0:
                 A_p_t = A_p[t].ravel()
                 nabla_t_T_A_p_t = nabla[t] @ A_p_t
                 out = minimize_scalar(partial(_f, t=t, loss_function=loss_function, S=S, _K=_K, C=C))
                 K[t] = _K(out.x, t)
-                loss_res[t] = loss_function(S[t], Z_0[t]) - C[t]
+                loss_res[t] = loss_function(S[t], K[t]) - C[t]
                 u[t] += loss_res[t]    
                 # con_obj[t][-1] = loss_res[t]
                 # if len(con_obj[t]) > 100 and np.mean(con_obj[t][-100:-50]) < np.mean(con_obj[t][-50:]) and loss_res[t] > 3:
@@ -257,7 +257,7 @@ def taylor_equal_time_graphical_lasso(
         A = K + U_0
         A += A.transpose(0, 2, 1)
         A /= 2.
-        Z_0 = soft_thresholding_od(A, lamda=alpha / rho)
+        Z_0 = soft_thresholding_od(A, lamda=theta / rho)
                 
         # other Zs
         A_1 = Z_0[:-1] + U_1
@@ -278,9 +278,6 @@ def taylor_equal_time_graphical_lasso(
                 rho=rho, tol=tol, rtol=rtol, max_iter=max_iter)
 
         # update residuals
-        con_obj_mean.append(np.mean(loss_res) ** 2)
-        con_obj_max.append(np.max(loss_res))
-
         U_0 += K - Z_0 
         U_1 += K[:-1] - Z_1
         U_2 += K[1:] - Z_2
@@ -294,15 +291,13 @@ def taylor_equal_time_graphical_lasso(
         dual_con_res = loss_res - loss_res_old
         dual_con_res += (trace_nabla_Z_0_old - np.array([np.sum(nabla_t * Z_0_t.flatten()) for (nabla_t, Z_0_t) in zip(nabla, Z_0)]))
 
-        loss_res_old = loss_res.copy()
-
         snorm = rho * np.sqrt(
-            squared_norm(dual_con_res[:, None, None] * nabla) + squared_norm(Z_0 - Z_0_old)
+            squared_norm(dual_con_res[:, None, None] * nabla) + squared_norm(Z_0 - Z_0_old) + 
             # squared_norm((rho * dual_con_res)[:, None, None] * nabla) + 
             squared_norm(Z_1 - Z_1_old) + squared_norm(Z_2 - Z_2_old)
             )
 
-        obj = penalty_objective(Z_0, Z_1, Z_2, psi, theta)
+        obj = objective(loss_res, Z_0, Z_1, Z_2, psi, theta)
 
         check = convergence(
             obj=obj,
@@ -328,19 +323,24 @@ def taylor_equal_time_graphical_lasso(
                  )
         )
 
-        Z_0_old = Z_0.copy()
-        Z_1_old = Z_1.copy()
-        Z_2_old = Z_2.copy()
-
         if verbose:
             print(
                 "obj: %.4f, rnorm: %.4f, snorm: %.4f,"
                 "eps_pri: %.4f, eps_dual: %.4f" % check[:5])
 
-        out_obj.append(penalty_objective(Z_0, Z_0[:-1], Z_0[1:], psi, theta))
+        loss_res_old = loss_res.copy()
+        Z_0_old = Z_0.copy()
+        Z_1_old = Z_1.copy()
+        Z_2_old = Z_2.copy()
+
+        loss_res_Z_0 = loss_gen(loss_function, S, Z_0) - C
+        con_obj_mean.append(np.mean(loss_res_Z_0) ** 2)
+        con_obj_max.append(np.max(loss_res_Z_0))
+        out_obj.append(objective(loss_res_Z_0, Z_0, Z_0[:-1], Z_0[1:], psi, theta))
+
         if not iteration_ % 100:
             print(iteration_)
-            print(np.max(loss_res), np.mean(loss_res))
+            print(np.max(con_obj_max[-1]), np.mean(loss_res_Z_0))
             print(out_obj[-1])
         checks.append(check)
 
@@ -352,10 +352,10 @@ def taylor_equal_time_graphical_lasso(
             break
 
         if len(con_obj_mean) > 100:
-            if np.mean(con_obj_mean[-100:-50]) < np.mean(con_obj_mean[-50:]) and np.max(loss_res) > 2:
+            if np.mean(con_obj_mean[-100:-50]) < np.mean(con_obj_mean[-50:]) and con_obj_max[-1] > 5:
             # or np.mean(con_obj_max[-100:-50]) < np.mean(con_obj_max[-50:])) # np.mean(loss_res) > 0.25:
-                print("Rho Mult", 2 * rho, iteration_, np.mean(loss_res), con_obj_max[-1])
-                # loss_diff /= 5            
+                print("Rho Mult", 2 * rho, iteration_, np.mean(loss_res_Z_0), con_obj_max[-1])
+                # loss_diff /= 2            
                 # C_ = C - loss_diff           
                 # resscale scaled dual variables
                 rho = div * rho
@@ -381,7 +381,7 @@ def taylor_equal_time_graphical_lasso(
     return return_list
 
 
-class TaylorEqualTimeGraphicalLasso(GraphicalLasso):
+class TaylorTimeGraphicalLasso(GraphicalLasso):
     """Sparse inverse covariance estimation with an l1-penalized estimator.
 
     Parameters
@@ -496,13 +496,13 @@ class TaylorEqualTimeGraphicalLasso(GraphicalLasso):
             Empirical covariance of data.
 
         """
-        out = taylor_equal_time_graphical_lasso(
+        out = taylor_time_graphical_lasso(
               emp_cov, self.emp_inv, max_iter=self.max_iter, loss=self.loss, C=self.C, 
               theta=self.theta, rho=self.rho, div=self.div, # n_samples=self.n_samples, 
               psi=self.psi, gamma=self.gamma, tol=self.tol, rtol=self.rtol, 
               verbose=self.verbose, return_history=self.return_history, return_n_iter=True,  
               mode=self.mode, compute_objective=self.compute_objective, stop_at=self.stop_at,
-              stop_when=self.stop_when, update_rho_options=self.update_rho_options, init=self.init)
+              stop_when=self.stop_when, update_rho_options=self.update_rho_options)
         if self.return_history:
             self.precision_, self.covariance_, self.history_, self.n_iter_ = out
         else:
