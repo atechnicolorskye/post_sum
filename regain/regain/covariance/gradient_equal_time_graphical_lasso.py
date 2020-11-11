@@ -218,7 +218,7 @@ def gradient_equal_time_graphical_lasso(
 
         def _f(x, loss_function, t, S, _Z_0, nabla, weights, C, loss_res_old, Z_0_t):
             _Z_0_t = _Z_0(x, t, nabla, weights)
-            loss_res_new = loss_function(S[t], _Z_0(x, t, nabla, weights)) - C[t]
+            loss_res_new = loss_function(S[t], _Z_0_t) - C[t]
             return loss_res_new ** 2 + (loss_res_new - loss_res_old - np.sum(nabla * (_Z_0_t - Z_0_t))) ** 2
 
         
@@ -229,25 +229,31 @@ def gradient_equal_time_graphical_lasso(
             else:
                 Z_0[t] = soft_thresholding_od(A_p[t] / (rho * divisor[t] + 1), lamda=theta / (rho * divisor[t] + 1))
             loss_res[t] = loss_function(S[t], Z_0[t]) - C[t]
-            if loss_res[t] > 0:
-                if loss_function.__name__ == 'neg_logl':
+            # if loss_res[t] > 0:
+            if loss_function.__name__ == 'neg_logl':
+                if weights is not None:                
+                    nabla = S[t] - np.linalg.inv(A_p[t] / (rho[t] * divisor[t] + 1))
+                else:
                     nabla = S[t] - np.linalg.inv(A_p[t] / (rho * divisor[t] + 1))
-                elif loss_function.__name__ == 'dtrace': 
-                    nabla = 2 * (A_p[t] / (rho * divisor[t] + 1) @ S[t] - I
-                out = minimize_scalar(partial(_f, loss_function=loss_function, t=t, S=S, _Z_0=_Z_0, nabla=nabla, weights=weights, C=C, loss_res_old=loss_res[t], Z_0_t=Z_0[t]))
-                Z_0[t] = _Z_0(out.x, t, nabla, weights)
-                loss_res[t] = loss_function(S[t], Z_0[t]) - C[t]
-                # u[t] += loss_res[t]    
+            elif loss_function.__name__ == 'dtrace': 
                 if weights is not None:
-                    con_obj[t][-1] = loss_res[t]
-                    if len(con_obj[t]) > m and np.mean(con_obj[t][-m:-int(m/2)]) < np.mean(con_obj[t][-int(m/2):]) and loss_res[t] > eps:
-                        if con_obj[t][-2] < con_obj[t][-1] and loss_res[t] > eps:
-                            rho *= weights[t]
-                            # u /= weights[t]
-                            U_1 /= weights[t][:-1, None, None]
-                            U_2 /= weights[t][1:, None, None]
-                            con_obj[t] = []
-                            print('Mult', iteration_, t, rho[t])
+                    nabla = 2 * (A_p[t] / (rho[t] * divisor[t] + 1)) @ S[t] - I
+                else:
+                    nabla = 2 * (A_p[t] / (rho * divisor[t] + 1)) @ S[t] - I
+            out = minimize_scalar(partial(_f, loss_function=loss_function, t=t, S=S, _Z_0=_Z_0, nabla=nabla, weights=weights, C=C, loss_res_old=loss_res[t], Z_0_t=Z_0[t]))
+            Z_0[t] = _Z_0(out.x, t, nabla, weights)
+            loss_res[t] = loss_function(S[t], Z_0[t]) - C[t]
+            # u[t] += loss_res[t]    
+            if weights is not None:
+                con_obj[t][-1] = loss_res[t]
+                if len(con_obj[t]) > m and np.mean(con_obj[t][-m:-int(m/2)]) < np.mean(con_obj[t][-int(m/2):]) and loss_res[t] > eps:
+                    if con_obj[t][-2] < con_obj[t][-1] and loss_res[t] > eps:
+                        rho *= weights[t]
+                        # u /= weights[t]
+                        U_1 /= weights[t][:-1, None, None]
+                        U_2 /= weights[t][1:, None, None]
+                        con_obj[t] = []
+                        print('Mult', iteration_, t, rho[t])
                             # if 1.5 * np.min(rho) < np.max(rho):
                             #     rho_new = np.max(rho) * np.ones(T)  
                             #     U_1 *= (rho / rho_new)[:-1, None, None]
