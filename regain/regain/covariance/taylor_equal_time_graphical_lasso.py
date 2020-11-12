@@ -233,7 +233,7 @@ def taylor_equal_time_graphical_lasso(
         nabla_T_nabla =  np.einsum('ij,ij->i', nabla, nabla)
         nabla_T_A = np.array([nabla_t @ A_t.ravel() for (nabla_t, A_t) in zip(nabla, A)])
             
-        if iteration_ > 0:
+        if iteration_ == 0:
             g = np.zeros(T)
             nabla = np.zeros_like(Z_0_flat)
             trace_nabla_Z_0_old =  g.copy()
@@ -381,7 +381,7 @@ def taylor_equal_time_graphical_lasso(
     return return_list
 
 
-class TaylorEqualTimeGraphicalLasso(GraphicalLasso):
+class NewTaylorEqualTimeGraphicalLasso(GraphicalLasso):
     """Sparse inverse covariance estimation with an l1-penalized estimator.
 
     Parameters
