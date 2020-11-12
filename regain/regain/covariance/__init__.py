@@ -33,7 +33,6 @@ from .time_graphical_lasso_ import TimeGraphicalLasso
 from .latent_time_graphical_lasso_ import LatentTimeGraphicalLasso
 from .inequality_time_graphical_lasso import InequalityTimeGraphicalLasso
 from .taylor_equal_time_graphical_lasso import TaylorEqualTimeGraphicalLasso
-from .new_taylor_equal_time_graphical_lasso import NewTaylorEqualTimeGraphicalLasso
 from .taylor_time_graphical_lasso import TaylorTimeGraphicalLasso
 from .gradient_equal_time_graphical_lasso import GradientEqualTimeGraphicalLasso
 

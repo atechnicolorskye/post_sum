@@ -381,7 +381,7 @@ def taylor_equal_time_graphical_lasso(
     return return_list
 
 
-class NewTaylorEqualTimeGraphicalLasso(GraphicalLasso):
+class TaylorEqualTimeGraphicalLasso(GraphicalLasso):
     """Sparse inverse covariance estimation with an l1-penalized estimator.
 
     Parameters
