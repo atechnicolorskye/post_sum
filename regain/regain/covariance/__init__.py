@@ -35,4 +35,5 @@ from .inequality_time_graphical_lasso import InequalityTimeGraphicalLasso
 from .taylor_equal_time_graphical_lasso import TaylorEqualTimeGraphicalLasso
 from .taylor_time_graphical_lasso import TaylorTimeGraphicalLasso
 from .gradient_equal_time_graphical_lasso import GradientEqualTimeGraphicalLasso
+
 from .cvx_tvgl import CVXInequalityTimeGraphicalLasso

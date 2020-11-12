@@ -71,7 +71,6 @@ def soft_thresholding_od(a, lamda):
             lamda = np.repeat(lamda, a.shape[0])
         else:
             assert lamda.shape[0] == a.shape[0]
-
         for t in range(a.shape[0]):
             out[t] = _soft_thresholding_od_2d(a[t], lamda[t])
     else:
