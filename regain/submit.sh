@@ -38,4 +38,4 @@ module load gcc/9.2.0
 #---------------------------------------------------------------------------------
 # Commands to execute below...
 
-ipython run_mosek.py
+ipython -u equality_constraint_ff5_ip30.py

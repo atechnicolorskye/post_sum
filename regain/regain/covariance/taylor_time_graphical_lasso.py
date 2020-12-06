@@ -67,11 +67,16 @@ def loss_gen(loss, S, K):
 
 def objective(loss_res, Z_0, Z_1, Z_2, psi, theta):
     """Objective function for time-varying graphical LASSO."""
-    return sum(loss_res ** 2) + theta * sum(map(l1_od_norm, Z_0)) + (1 - theta) * sum(map(psi, Z_2 - Z_1))
+    return 0.5 * sum(loss_res ** 2) + theta * sum(map(l1_od_norm, Z_0)) + (1 - theta) * sum(map(psi, Z_2 - Z_1))
+
+
+def penalty_objective(Z_0, Z_1, Z_2, psi, theta):
+    """Objective function for time-varying graphical LASSO."""
+    return theta * sum(map(l1_od_norm, Z_0)) + (1 - theta) * sum(map(psi, Z_2 - Z_1))
 
 
 def rbf_weights(T, bandwidth, mult):
-    """RBF Weights"""
+    """RBF weights"""
     weights = np.zeros((T, T))
     for i in range(T):
         time_diff = np.arange(-i, T-i)
@@ -79,8 +84,8 @@ def rbf_weights(T, bandwidth, mult):
     return weights
 
 
-def lin_weights(T, bandwidth, mult):
-    """Linear Weights"""
+def exp_weights(T, bandwidth, mult):
+    """Exponential weights"""
     weights = np.zeros((T, T))
     for i in range(T):
         time_diff = np.arange(-i, T-i)
@@ -88,11 +93,20 @@ def lin_weights(T, bandwidth, mult):
     return weights
 
 
+def lin_weights(T, bandwidth, mult):
+    """Linear Weights"""
+    weights = np.zeros((T, T))
+    for t in range(T):
+        time_diff = np.arange(-t, T-t)
+        weights[t] = (bandwidth - np.abs(time_diff)) / bandwidth * (mult - 1) + 1
+    return weights
+
+
 def taylor_time_graphical_lasso(
-    S, K_init, max_iter, loss, C, theta, rho, div, 
-    psi, gamma, tol, rtol, verbose, return_history, 
-    return_n_iter, mode, compute_objective, stop_at, 
-    stop_when, update_rho_options
+    S, K_init, max_iter, loss, C, theta, rho, mult, 
+    weights, m, eps, psi, gamma, tol, rtol, verbose, 
+    return_history, return_n_iter, mode, compute_objective, 
+    stop_at, stop_when, update_rho_options
     ):
     """Equality constrained time-varying graphical LASSO solver.
 
@@ -149,21 +163,21 @@ def taylor_time_graphical_lasso(
     psi, prox_psi, psi_node_penalty = check_norm_prox(psi)
 
     if loss == 'LL':
-        loss_function = neg_logl
+        loss_func = neg_logl
     else:
-        loss_function = dtrace
+        loss_func = dtrace
 
     T = S.shape[0]
     S_flat = S.copy().reshape(T, S.shape[1] * S.shape[2])
     I_flat = np.diagflat(S.shape[1]).ravel()
 
-    K = K_init
-    Z_0 = K_init
+    K = K_init.copy()
+    Z_0 = K_init.copy()
     Z_1 = Z_0.copy()[:-1] 
     Z_2 = Z_0.copy()[1:]  
 
     u = np.zeros(T)
-    U_0 = np.zeros_like(Z_0) 
+    U_0 = np.zeros_like(Z_0)
     U_1 = np.zeros_like(Z_1)
     U_2 = np.zeros_like(Z_2)
 
@@ -176,126 +190,171 @@ def taylor_time_graphical_lasso(
     divisor[0] -= 1
     divisor[-1] -= 1
 
-    # rho = rho * np.ones(T)    
-    # weights = rbf_weights(T, 5, 1.1)
+    rho = rho * np.ones(T)    
+    if weights[0] is not None:
+        if weights == 'rbf':
+            weights = rbf_weights(T, weights, mult)
+        elif weights == 'exp':
+            weights = exp_weights(T, weights, mult)
+        elif weights == 'lin:':
+            weights = lin_weights(T, weights, mult)
+        con_obj = {}
+        for t in range(T):
+            con_obj[t] = []
 
-    # con_obj = {}
-    # for t in range(T):
-    #     con_obj[t] = []
     con_obj_mean = []
     con_obj_max = []
-    out_obj = []
 
+    # loss residuals
     loss_res = np.zeros(T)
+    loss_init = loss_gen(loss_func, S, Z_0_old)
+    loss_res_old = loss_init - C
+
+    # loss_diff = C - loss_init
+    # C_  = C - loss_diff
+
+    out_obj = []
 
     checks = [
         convergence(
-            obj=objective(loss_res, Z_0, Z_1, Z_2, psi, theta))
+            obj=penalty_objective(Z_0, Z_1, Z_2, psi, theta))
     ]
 
-    loss_init = loss_gen(loss_function, S, Z_0_old)
-    loss_diff = C - loss_init
 
-    C_  = C - loss_diff / 2
+    def _K(x, A_t, g_t, nabla_t, nabla_t_T_A_t, nabla_t_T_nabla_t, rho_t, divisor_t):
+        _K_t = (A_t + x * g_t * nabla_t - 
+                    (x * nabla_t_T_A_t + x ** 2 * g_t * nabla_t_T_nabla_t) * nabla_t  / 
+                    (divisor_t * rho_t + x * nabla_t_T_nabla_t)
+                ).reshape(S.shape[1], S.shape[2])
+        _K_t /= (rho_t * divisor_t)
+        return 0.5 * (_K_t + _K_t.transpose(1, 0))
+
+
+    # def _K(x, A_t, nabla_t):
+    #     _A_t = A_t - x * nabla_t
+    #     return _A_t
+
+
+    # constrained optimisation via line search
+    def _f(x, _K, A_t, g_t, nabla_t, nabla_t_T_A_t, nabla_t_T_nabla_t, rho_t, divisor_t, 
+            loss_func, S_t, c_t, loss_res_old_t, nabla_t_T_K_old_t):
+        _K_t = _K(x, A_t, g_t, nabla_t, nabla_t_T_A_t, nabla_t_T_nabla_t, rho_t, divisor_t)
+        loss_res_t = loss_func(S_t, _K_t) - c_t
+        return loss_res_t ** 2 + (loss_res_t - loss_res_old_t - nabla_t @ _K_t.ravel() + nabla_t_T_K_old_t) ** 2
+
+
+    # # constrained optimisation via line search
+    # def _f(x, _K, A_t, nabla_t, loss_func, S_t, c_t, loss_res_old_t):
+    #     _K_t = _K(x, A_t, nabla_t)
+    #     loss_res_t = loss_func(S_t, _K_t) - c_t
+    #     return loss_res_t ** 2 + (loss_res_t - loss_res_old_t - np.sum(nabla_t * (_K_t - A_t))) ** 2
+
 
     for iteration_ in range(max_iter):
-        if iteration_ == 0:
-            loss_res_old = -loss_diff
-            g = np.zeros(T)
-            nabla = np.zeros_like(S_flat)
-            trace_nabla_Z_0_old =  g.copy()
-            trace_nabla_nabla = g.copy()
-        else:
-            if loss_function.__name__ == 'neg_logl':
-                nabla = np.array([S_t - np.linalg.inv(K_t).ravel() for (S_t, K_t) in zip(S_flat, K)])
-            elif loss_function.__name__ == 'dtrace': 
-                nabla = np.array([(2 * K_t.ravel() @ S_t - I) for (S_t, K_t) in zip(S_flat, K)])
-            trace_nabla_Z_0_old = np.array([nabla_t @ K_t.ravel() for (nabla_t, K_t) in zip(nabla, K)])
-            g = trace_nabla_Z_0_old - loss_res_old - u
-            trace_nabla_nabla =  np.einsum('ij,ij->i', nabla, nabla)
-        
-        A_p = rho * (Z_0 - U_0)
-        # A_p[:-1] += rho[:-1, None, None] * (Z_1 - U_1)
-        # A_p[1:] += rho[1:, None, None] * (Z_2 - U_2)
-        A_p[:-1] += rho * (Z_1 - U_1)
-        A_p[1:] += rho * (Z_2 - U_2)
-
-        def _K(x, t):
-            # Z_0_t = (A_p_t + x * g[t] * nabla[t] - ((x * nabla_t_T_A_p_t + x ** 2 * g[t] * trace_nabla_nabla[t]) * nabla[t])  / (divisor[t] * rho[t] + x * trace_nabla_nabla[t])).reshape(S.shape[1], S.shape[2])
-            # return 0.5 * (Z_0_t + Z_0_t.transpose(1,0)) / (rho[t] * divisor[t])
-            K_t = (A_p_t + x * g[t] * nabla[t] - ((x * nabla_t_T_A_p_t + x ** 2 * g[t] * trace_nabla_nabla[t]) * nabla[t])  / (divisor[t] * rho + x * trace_nabla_nabla[t])).reshape(S.shape[1], S.shape[2])
-            return 0.5 * (K_t + K_t.transpose(1,0)) / (rho * divisor[t])
-            
-
-        def _f(x, t, loss_function, S, _K, C):
-            return (loss_function(S[t], _K(x, t)) - C[t]) ** 2
-
         # update K
+        A = rho[:, None, None] * (Z_0 - U_0)
+        A[:-1] += rho[:-1, None, None] * (Z_1 - U_1)
+        A[1:] += rho[1:, None, None] * (Z_2 - U_2)
+        # A += A.transpose(0, 2, 1)
+        # A /= 2. 
+        # A /= (rho * divisor)[:, None, None]
+
+        # loss_res_pre = loss_gen(loss_func, S, A) - C
+
+        if loss_func.__name__ == 'neg_logl':
+            nabla = np.array([S_t - np.linalg.inv(K_t).ravel() for (S_t, K_t) in zip(S_flat, K)])
+            # nabla = np.array([S_t - np.linalg.inv(K_t) for (S_t, K_t) in zip(S, A)])
+        elif loss_func.__name__ == 'dtrace': 
+            nabla = np.array([(2 * K_t.ravel() @ S_t - I) for (S_t, K_t) in zip(S_flat, K)])
+            # nabla = np.array([(2 * K_t @ S_t - I) for (S_t, K_t) in zip(S, K)])
+        nabla_T_K_old = np.array([nabla_t @ K_t.ravel() for (nabla_t, K_t) in zip(nabla, K)])
+        # nabla_T_K_old = np.array([np.sum(nabla_t * K_t) for (nabla_t, K_t) in zip(nabla, K)])
+        g = nabla_T_K_old - loss_res_old
+        nabla_T_A = np.array([nabla_t @ A_t.ravel() for (nabla_t, A_t) in zip(nabla, A)])
+        nabla_T_nabla =  np.einsum('ij,ij->i', nabla, nabla)
+        
+        if iteration_ == 0:
+            nabla = np.zeros_like(S_flat)
+            # nabla = np.zeros_like(S)
+            nabla_T_K_old = np.zeros(T)
+            g = np.zeros(T)
+            nabla_T_A = np.zeros(T)
+            nabla_T_nabla = np.zeros(T)
+
+        col = []
+
         for t in range(T):
-            # K[t] = 0.5 * (A_p[t] + A_p[t].transpose(1,0)) / (rho[t] * divisor[t])
-            K[t] = 0.5 * (A_p[t] + A_p[t].transpose(1,0)) / (rho * divisor[t])
-            loss_res[t] = loss_function(S[t], K[t]) - C[t]
-            # con_obj[t].append(loss_res[t])
-            if loss_res[t] > 0:
-                A_p_t = A_p[t].ravel()
-                nabla_t_T_A_p_t = nabla[t] @ A_p_t
-                out = minimize_scalar(partial(_f, t=t, loss_function=loss_function, S=S, _K=_K, C=C))
-                K[t] = _K(out.x, t)
-                loss_res[t] = loss_function(S[t], K[t]) - C[t]
-                u[t] += loss_res[t]    
-                # con_obj[t][-1] = loss_res[t]
-                # if len(con_obj[t]) > 100 and np.mean(con_obj[t][-100:-50]) < np.mean(con_obj[t][-50:]) and loss_res[t] > 3:
-                #     if con_obj[t][-2] < con_obj[t][-1] and loss_res[t] > 3:
-                #         rho *= weights[t]
-                #         u /= weights[t]
-                #         U_1 /= weights[t][:-1, None, None]
-                #         U_2 /= weights[t][1:, None, None]
-                #         con_obj[t] = []
-                #         print(iteration_, t, rho[t])
+            out = minimize_scalar(
+                    partial(_f, _K=_K, A_t=A[t].ravel(), g_t=g[t], nabla_t=nabla[t], 
+                            nabla_t_T_A_t=nabla_T_A[t], nabla_t_T_nabla_t=nabla_T_nabla[t], 
+                            rho_t=rho[t], divisor_t=divisor[t], loss_func=loss_func, 
+                            S_t=S[t], c_t=C[t], loss_res_old_t=loss_res_old[t], 
+                            nabla_t_T_K_old_t=nabla_T_K_old[t])
+                    )
+            # out = minimize_scalar(
+            #         partial(_f, _K=_K, A_t=A[t], nabla_t=nabla[t], loss_func=loss_func, 
+            #                 S_t=S[t], c_t=C[t], loss_res_old_t=loss_res_pre[t])
+            #         )
+            K[t] = _K(out.x, A[t].ravel(), g[t], nabla[t], nabla_T_A[t], nabla_T_nabla[t], rho[t], divisor[t])
+            # K[t] = _K(out.x, A[t], nabla[t])
+            loss_res[t] = loss_func(S[t], K[t]) - C[t]
+            # u[t] += loss_res[t]    
+            if weights[0] is not None:
+                con_obj[t].append(loss_res[t] ** 2)    
+                if len(con_obj[t]) > m and np.mean(con_obj[t][-m:-int(m/2)]) < np.mean(con_obj[t][-int(m/2):]) and loss_res[t] > eps:
+                    col.append(t)
                 
         # update Z_0
-        A = K + U_0
-        A += A.transpose(0, 2, 1)
-        A /= 2.
-        Z_0 = soft_thresholding_od(A, lamda=theta / rho)
+        _Z_0 = K + U_0
+        _Z_0 += _Z_0.transpose(0, 2, 1)
+        _Z_0 /= 2.
+        Z_0 = soft_thresholding_od(_Z_0, lamda=theta / rho[:, None, None])
                 
-        # other Zs
+        # update Z_1, Z_2
         A_1 = Z_0[:-1] + U_1
         A_2 = Z_0[1:] + U_2
         if not psi_node_penalty:
-            # prox_e = prox_psi(A_2 - A_1, lamda=2. * (1 - theta) / rho[t])
-            # Z_1 = .5 * (A_1 + A_2 - prox_e)
-            # Z_2 = .5 * (A_1 + A_2 + prox_e)
-            prox_e = prox_psi(A_2 - A_1, lamda=2. * (1 - theta) / rho)
-            Z_1 = .5 * (A_1 + A_2 - prox_e)
-            Z_2 = .5 * (A_1 + A_2 + prox_e)
-        else:
-            # Z_1, Z_2 = prox_psi(
-            #     np.concatenate((A_1, A_2), axis=1), lamda=.5 * (1 - theta) / rho[t],
-            #     rho=rho[t], tol=tol, rtol=rtol, max_iter=max_iter)
-            Z_1, Z_2 = prox_psi(
-                np.concatenate((A_1, A_2), axis=1), lamda=.5 * (1 - theta) / rho,
-                rho=rho, tol=tol, rtol=rtol, max_iter=max_iter)
+            A_add = A_2 + A_1
+            A_sub = A_2 - A_1
+            prox_e_1 = prox_psi(A_sub, lamda=2. * (1 - theta) / rho[:-1, None, None])
+            prox_e_2 = prox_psi(A_sub, lamda=2. * (1 - theta) / rho[1:, None, None])
+            Z_1 = .5 * (A_add - prox_e_1)
+            Z_2 = .5 * (A_add + prox_e_2)
+        # TODO: Fix for rho vector
+        # else:
+        #     if weights is not None:
+        #         Z_1, Z_2 = prox_psi(
+        #             np.concatenate((A_1, A_2), axis=1), lamda=.5 * (1 - theta) / rho[t],
+        #             rho=rho[t], tol=tol, rtol=rtol, max_iter=max_iter)
 
         # update residuals
+        con_obj_mean.append(np.mean(loss_res) ** 2)
+        con_obj_max.append(np.max(loss_res))
+
         U_0 += K - Z_0 
         U_1 += K[:-1] - Z_1
         U_2 += K[1:] - Z_2
 
         # diagnostics, reporting, termination checks
         rnorm = np.sqrt(
-            squared_norm(loss_res) + # squared_norm(Z_0_res) + 
-            squared_norm(Z_0[:-1] - Z_1) + squared_norm(Z_0[1:] - Z_2)
+            squared_norm(K - Z_0) + 
+            squared_norm(K[:-1] - Z_1) +
+             squared_norm(K[1:] - Z_2)
             )
 
-        dual_con_res = loss_res - loss_res_old
-        dual_con_res += (trace_nabla_Z_0_old - np.array([np.sum(nabla_t * Z_0_t.flatten()) for (nabla_t, Z_0_t) in zip(nabla, Z_0)]))
+        loss_res_old = loss_res.copy()
+        
+        snorm = np.sqrt(
+                    squared_norm(rho[:, None, None] * (Z_0 - Z_0_old)) + 
+                    squared_norm(rho[:-1, None, None] * (Z_1 - Z_1_old)) + 
+                    squared_norm(rho[1:, None, None] * (Z_2 - Z_2_old))
+                )
 
-        snorm = rho * np.sqrt(
-            squared_norm(dual_con_res[:, None, None] * nabla) + squared_norm(Z_0 - Z_0_old) + 
-            # squared_norm((rho * dual_con_res)[:, None, None] * nabla) + 
-            squared_norm(Z_1 - Z_1_old) + squared_norm(Z_2 - Z_2_old)
-            )
+        e_dual = np.sqrt(Z_0.size + 2 * Z_1.size) * tol + rtol * np.sqrt(
+                    squared_norm(rho[:, None, None] * U_0) + 
+                    squared_norm(rho[:-1, None, None] * U_1) + 
+                    squared_norm(rho[1:, None, None] * U_2)
+                 )
 
         obj = objective(loss_res, Z_0, Z_1, Z_2, psi, theta)
 
@@ -305,42 +364,26 @@ def taylor_time_graphical_lasso(
             snorm=snorm,
             e_pri=np.sqrt(loss_res.size + Z_0.size + 2 * Z_1.size) * tol + rtol * 
                 (
-                max(np.sqrt(squared_norm(loss_res + C)), np.sqrt(squared_norm(C))) + 
                 max(np.sqrt(squared_norm(Z_0)), np.sqrt(squared_norm(K))) +
                 max(np.sqrt(squared_norm(Z_1)), np.sqrt(squared_norm(K[:-1]))) + 
                 max(np.sqrt(squared_norm(Z_2)), np.sqrt(squared_norm(K[1:])))
                 ),
-            e_dual=np.sqrt(loss_res.size + Z_0.size + 2 * Z_1.size) * tol + rtol * rho * 
-            # e_dual=np.sqrt(loss_res.size + Z_0.size + 2 * Z_1.size) * tol + rtol * 
-                np.sqrt(
-                    # squared_norm(rho * u) +
-                    # squared_norm(rho[:-1, None, None] * U_1) + 
-                    # squared_norm(rho[1:, None, None] * U_2)
-                    squared_norm(u) +
-                    squared_norm(U_0) + 
-                    squared_norm(U_1) + 
-                    squared_norm(U_2)
-                 )
+            e_dual=e_dual
         )
+
+        Z_0_old = Z_0.copy()
+        Z_1_old = Z_1.copy()
+        Z_2_old = Z_2.copy()
 
         if verbose:
             print(
                 "obj: %.4f, rnorm: %.4f, snorm: %.4f,"
                 "eps_pri: %.4f, eps_dual: %.4f" % check[:5])
 
-        loss_res_old = loss_res.copy()
-        Z_0_old = Z_0.copy()
-        Z_1_old = Z_1.copy()
-        Z_2_old = Z_2.copy()
-
-        loss_res_Z_0 = loss_gen(loss_function, S, Z_0) - C
-        con_obj_mean.append(np.mean(loss_res_Z_0) ** 2)
-        con_obj_max.append(np.max(loss_res_Z_0))
-        out_obj.append(objective(loss_res_Z_0, Z_0, Z_0[:-1], Z_0[1:], psi, theta))
-
+        out_obj.append(penalty_objective(Z_0, Z_0[:-1], Z_0[1:], psi, theta))
         if not iteration_ % 100:
             print(iteration_)
-            print(np.max(con_obj_max[-1]), np.mean(loss_res_Z_0))
+            print(np.max(con_obj_max[-1]), np.mean(loss_res))
             print(out_obj[-1])
         checks.append(check)
 
@@ -351,19 +394,30 @@ def taylor_time_graphical_lasso(
         if check.rnorm <= check.e_pri and check.snorm <= check.e_dual:
             break
 
-        if len(con_obj_mean) > 100:
-            if np.mean(con_obj_mean[-100:-50]) < np.mean(con_obj_mean[-50:]) and con_obj_max[-1] > 5:
-            # or np.mean(con_obj_max[-100:-50]) < np.mean(con_obj_max[-50:])) # np.mean(loss_res) > 0.25:
-                print("Rho Mult", 2 * rho, iteration_, np.mean(loss_res_Z_0), con_obj_max[-1])
-                # loss_diff /= 2            
-                # C_ = C - loss_diff           
-                # resscale scaled dual variables
-                rho = div * rho
-                u /= div
-                U_1 /= div
-                U_2 /= div
-                con_obj_mean = []
-                con_obj_max = []
+        if weights[0] is None:
+            if len(con_obj_mean) > m:
+                if np.mean(con_obj_mean[-m:-int(m/2)]) < np.mean(con_obj_mean[-int(m/2):]) and np.max(loss_res) > eps:
+                # or np.mean(con_obj_max[-100:-50]) < np.mean(con_obj_max[-50:])) # np.mean(loss_res) > 0.25:
+                    print("Rho Mult", mult * rho[0], iteration_, np.mean(loss_res), con_obj_max[-1])
+                    # loss_diff /= 5            
+                    # C_ = C - loss_diff           
+                    # resscale scaled dual variables
+                    rho = mult * rho
+                    # u /= mult
+                    U_0 /= mult
+                    U_1 /= mult
+                    U_2 /= mult
+                    con_obj_mean = []
+                    con_obj_max = []
+        else:
+            for t in col:
+                rho *= weights[t]
+                # u /= weights[t]
+                U_0 /= weights[t][:, None, None]
+                U_1 /= weights[t][:-1, None, None]
+                U_2 /= weights[t][1:, None, None]
+                con_obj[t] = []
+                print('Mult', iteration_, t, rho[t])    
     else:
         warnings.warn("Objective did not converge.")
 
@@ -452,8 +506,9 @@ class TaylorTimeGraphicalLasso(GraphicalLasso):
     """
     def __init__(
             self, max_iter=1000, loss='LL', c_level=None, theta=0.5,
-            rho=1e2, div=2, psi='laplacian', gamma=None, tol=1e-4, rtol=1e-4, 
-            mode='admm', verbose=False, assume_centered=False, return_history=False, 
+            rho=1e2, mult=2, weights=None, m=100, eps=2, psi='laplacian', 
+            gamma=None, tol=1e-4, rtol=1e-4, mode='admm', 
+            verbose=False, assume_centered=False, return_history=False, 
             update_rho_options=None, compute_objective=True, stop_at=None, 
             stop_when=1e-4, suppress_warn_list=False):
         super().__init__(
@@ -466,7 +521,10 @@ class TaylorTimeGraphicalLasso(GraphicalLasso):
         self.c_level = c_level
         self.theta = theta
         self.rho = rho
-        self.div = div
+        self.mult = mult
+        self.weights = weights
+        self.m = m
+        self.eps = eps
         self.psi = psi
         self.gamma = gamma
         self.return_history = return_history
@@ -498,8 +556,8 @@ class TaylorTimeGraphicalLasso(GraphicalLasso):
         """
         out = taylor_time_graphical_lasso(
               emp_cov, self.emp_inv, max_iter=self.max_iter, loss=self.loss, C=self.C, 
-              theta=self.theta, rho=self.rho, div=self.div, # n_samples=self.n_samples, 
-              psi=self.psi, gamma=self.gamma, tol=self.tol, rtol=self.rtol, 
+              theta=self.theta, rho=self.rho, mult=self.mult, weights=self.weights, m=self.m, 
+              eps=self.eps, psi=self.psi, gamma=self.gamma, tol=self.tol, rtol=self.rtol, 
               verbose=self.verbose, return_history=self.return_history, return_n_iter=True,  
               mode=self.mode, compute_objective=self.compute_objective, stop_at=self.stop_at,
               stop_when=self.stop_when, update_rho_options=self.update_rho_options)

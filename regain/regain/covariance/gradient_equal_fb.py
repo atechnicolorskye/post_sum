@@ -53,8 +53,9 @@ from regain.prox import soft_thresholding_od
 from regain.update_rules import update_rho
 from regain.utils import convergence, error_norm_time
 from regain.validation import check_norm_prox
+from regain.forward_backward import choose_gamma
 
-from scipy.optimize import minimize_scalar
+from scipy.optimize import minimize
 from functools import partial
 
 import pdb
@@ -108,6 +109,17 @@ def lin_weights(T, bandwidth, mult):
         time_diff = np.arange(-t, T-t)
         weights[t] = (bandwidth - np.abs(time_diff)) / bandwidth * (mult - 1) + 1
     return weights
+
+
+def grad_laplacian(x):
+    """Gradient of the loss function for TGL with laplacian penalty."""
+    aux = np.empty_like(x)
+    aux[0] = x[0] - x[1]
+    aux[-1] = x[-1] - x[-2]
+    for t in range(1, x.shape[0] - 1):
+        aux[t] = 2 * x[t] - x[t - 1] - x[t + 1]
+
+    return aux
 
 
 def gradient_equal_time_graphical_lasso(
@@ -179,227 +191,61 @@ def gradient_equal_time_graphical_lasso(
     I = np.eye(S.shape[1])
     
     Z_0 = K_init
-    Z_1 = Z_0.copy()[:-1] 
-    Z_2 = Z_0.copy()[1:]  
-
-    U_1 = np.zeros_like(Z_1)
-    U_2 = np.zeros_like(Z_2)
-
-    Z_0_old = Z_0.copy()
-    Z_1_old = np.zeros_like(Z_1)
-    Z_2_old = np.zeros_like(Z_2)
-
-    # divisor for consensus variables, accounting for one less matrix for t = 0 and t = T
-    divisor = np.full(T, 2, dtype=float)
-    divisor[0] -= 1
-    divisor[-1] -= 1
-
-    rho = rho * np.ones(T)    
-    if weights[0] is not None:
-        if weights == 'rbf':
-            weights = rbf_weights(T, weights, mult)
-        elif weights == 'exp':
-            weights = exp_weights(T, weights, mult)
-        elif weights == 'lin:':
-            weights = lin_weights(T, weights, mult)
-        con_obj = {}
-        for t in range(T):
-            con_obj[t] = []
     
-    # loss residuals
-    loss_res = np.zeros(T)
-    loss_init = loss_gen(loss_func, S, Z_0_old)
-    loss_res_old = loss_init - C
-
-    # loss_diff = C - loss_init
-    # C_  = C - loss_diff
-
-    con_obj_mean = []
-    con_obj_max = []
     out_obj = []
-    
+
     checks = [
         convergence(
-            obj=penalty_objective(Z_0, Z_1, Z_2, psi, theta))
+            obj=penalty_objective(Z_0, Z_0, Z_0, psi, theta))
     ]
 
-    # soft-thresholded gradient modified Z_0_t
-    def _Z_0(x, A_t, nabla_t, rho_t, divisor_t):
-        _A_t = A_t - x * nabla_t 
-        return soft_thresholding_od(_A_t, lamda=theta / (rho_t * divisor_t))            
-
-
-    # # soft-thresholded gradient modified Z_0
-    # def _Z_0(x, A_t, nabla, rho, divisor):
-    #     _A_t = A_t - x * nabla 
-    #     return soft_thresholding_od(_A_t, lamda=theta / (rho * divisor)[:, None, None])            
-
+    def _Z_0(x1, x2, Z_0, loss_res, nabla_con, nabla_pen):
+        A = Z_0 - x2 * (1 - theta) * nabla_pen
+        # A = Z_0 - x1 * nabla_con - x2 * (1 - theta) * nabla_pen
+        A -= x1 * loss_res[:, None, None] * nabla_con
+        return soft_thresholding_od(A, lamda=x2 * theta), A            
 
     # constrained optimisation via line search
-    def _f(x, _Z_0, A_t, nabla_t, rho_t, divisor_t, loss_func, S_t, c_t, loss_res_pre_t, Z_0_t):
-        _Z_0_t = _Z_0(x, A_t, nabla_t, rho_t, divisor_t)
-        loss_res_t = loss_func(S_t, _Z_0_t) - c_t
-        return loss_res_t ** 2 + (loss_res_t - loss_res_pre_t - np.sum(nabla_t * (_Z_0_t - Z_0_t))) ** 2
+    def _f(x, _Z_0, Z_0, loss_res, nabla_con, nabla_pen, loss_func, S, C):
+        _Z_0, A = _Z_0(x[0], x[1], Z_0, loss_res, nabla_con, nabla_pen)
+        loss_res = loss_gen(loss_func, S, _Z_0) - C
+        # loss_res_A = loss_gen(loss_func, S, A) - C
+        # return squared_norm(loss_res) + squared_norm(loss_res - loss_res_A)
+        return squared_norm(loss_res) + squared_norm(_Z_0 - A) / (S.shape[1] * S.shape[2])
 
-    
-    # # max constrained optimisation via line search
-    # def _f(x, _Z_0, A, nabla, rho, divisor, loss_func, S, C, loss_res_pre, Z_0):
-    #     _Z_0 = _Z_0(x, A, nabla, rho, divisor)
-    #     loss_res = loss_gen(loss_func, S, _Z_0) - C
-    #     return np.max(loss_res ** 2) + np.max((loss_res - loss_res_pre - np.sum(nabla * (_Z_0 - Z_0), (1, 2))) ** 2)
-
+    loss_res = loss_gen(loss_func, S, Z_0) - C
 
     for iteration_ in range(max_iter):
-        # update Z_0        
-        A = np.zeros_like(Z_0)
-        A[:-1] += Z_1 - U_1
-        A[1:] += Z_2 - U_2
-        A += A.transpose(0, 2, 1)
-        A /= 2. 
-        A /= divisor[:, None, None]
-
-        Z_0_pre = soft_thresholding_od(A, lamda=theta / (rho * divisor)[:, None, None])
-        loss_res_pre = loss_gen(loss_func, S, Z_0_pre) - C
-
         if loss_func.__name__ == 'neg_logl':
-            nabla = np.array([S_t - np.linalg.inv(A_t) for (S_t, A_t) in zip(S, A)])
+            nabla_con = np.array([S_t - np.linalg.inv(A_t) for (S_t, A_t) in zip(S, Z_0)])
             # nabla = np.array([S_t - np.linalg.inv(Z_0_t) for (S_t, Z_0_t) in zip(S, Z_0_pre)])
         elif loss_func.__name__ == 'dtrace': 
-            nabla = np.array([(2 * A_t @ S_t - I) for (S_t, A_t) in zip(S, A)])
+            nabla_con = np.array([(2 * A_t @ S_t - I) for (S_t, A_t) in zip(S, Z_0)])
             # nabla = np.array([(2 * Z_0_t @ S_t - I) for (S_t, Z_0_t) in zip(S, Z_0_pre)])
 
-        # out = minimize_scalar(
-        #         partial(_f, _Z_0=_Z_0, A=A, nabla=nabla, rho=rho, 
-        #                 divisor=divisor, loss_func=loss_func, S=S,   
-        #                 C=C, loss_res_pre=loss_res_pre, Z_0=Z_0_pre)
-        #         )
-        # Z_0 = _Z_0(out.x, A, nabla, rho, divisor)
-        # loss_res = loss_gen(loss_func, S, Z_0_pre) - C
+        nabla_pen = grad_laplacian(Z_0)
 
-        col = []
-
-        for t in range(T):
-            out = minimize_scalar(
-                    partial(_f, _Z_0=_Z_0, A_t=A[t], nabla_t=nabla[t], rho_t=rho[t], 
-                            divisor_t=divisor[t], loss_func=loss_func, S_t=S[t],   
-                            c_t=C[t], loss_res_pre_t=loss_res_pre[t], Z_0_t=Z_0_pre[t])
-                    )
-            Z_0[t] = _Z_0(out.x, A[t], nabla[t], rho[t], divisor[t])
-            loss_res[t] = loss_func(S[t], Z_0[t]) - C[t]
-            if weights[0] is not None:
-                con_obj[t].append(loss_res[t] ** 2)    
-                if len(con_obj[t]) > m and np.mean(con_obj[t][-m:-int(m/2)]) < np.mean(con_obj[t][-int(m/2):]) and loss_res[t] > eps:
-                    col.append(t)
-
-        # update Z_1, Z_2
-        A_1 = Z_0[:-1] + U_1
-        A_2 = Z_0[1:] + U_2
-        if not psi_node_penalty:
-            A_add = A_2 + A_1
-            A_sub = A_2 - A_1
-            prox_e_1 = prox_psi(A_sub, lamda=2. * (1 - theta) / rho[:-1, None, None])
-            prox_e_2 = prox_psi(A_sub, lamda=2. * (1 - theta) / rho[1:, None, None])
-            Z_1 = .5 * (A_add - prox_e_1)
-            Z_2 = .5 * (A_add + prox_e_2)
-        # TODO: Fix for rho vector
-        # else:
-        #     if weights is not None:
-        #         Z_1, Z_2 = prox_psi(
-        #             np.concatenate((A_1, A_2), axis=1), lamda=.5 * (1 - theta) / rho[t],
-        #             rho=rho[t], tol=tol, rtol=rtol, max_iter=max_iter)
-
-        # update residuals
-        con_obj_mean.append(np.mean(loss_res) ** 2)
-        # con_obj_mean.append(np.max(loss_res) ** 2)
-        con_obj_max.append(np.max(loss_res))
-
-        U_1 += Z_0[:-1] - Z_1
-        U_2 += Z_0[1:] - Z_2
-
-        # diagnostics, reporting, termination checks
-        rnorm = np.sqrt(
-                    squared_norm(loss_res) + 
-                    squared_norm(Z_0[:-1] - Z_1) + 
-                    squared_norm(Z_0[1:] - Z_2)
+        out = minimize(
+                partial(_f, _Z_0=_Z_0, Z_0=Z_0, loss_res=loss_res, nabla_con=nabla_con, 
+                        nabla_pen=nabla_pen, loss_func=loss_func,  S=S, C=C),
+                x0=np.zeros(2),
+                method='Nelder-Mead',
+                tol=1e-4
                 )
-
-        loss_res_old = loss_res.copy()
-
-        snorm = np.sqrt(
-                    squared_norm(rho[:-1, None, None] * (Z_1 - Z_1_old)) + 
-                    squared_norm(rho[1:, None, None] * (Z_2 - Z_2_old))
-                )
-        e_dual = np.sqrt(2 * Z_1.size) * tol + rtol * np.sqrt(
-                    squared_norm(rho[:-1, None, None] * U_1) + 
-                    squared_norm(rho[1:, None, None] * U_2)
-                )     
-
-        obj = penalty_objective(Z_0, Z_1, Z_2, psi, theta)
-
-        check = convergence(
-            obj=obj,
-            rnorm=rnorm,
-            snorm=snorm,
-            e_pri=np.sqrt(loss_res.size + 2 * Z_1.size) * tol + rtol * 
-                (
-                    max(np.sqrt(squared_norm(loss_res + C)), np.sqrt(squared_norm(C))) + 
-                    max(np.sqrt(squared_norm(Z_1)), np.sqrt(squared_norm(Z_0[:-1]))) + 
-                    max(np.sqrt(squared_norm(Z_2)), np.sqrt(squared_norm(Z_0[1:])))
-                ),
-            e_dual=e_dual
-        )
-
-        Z_0_old = Z_0.copy()
-        Z_1_old = Z_1.copy()
-        Z_2_old = Z_2.copy()
-
-        if verbose:
-            print(
-                "obj: %.4f, rnorm: %.4f, snorm: %.4f,"
-                "eps_pri: %.4f, eps_dual: %.4f" % check[:5])
-
+        Z_0, _ = _Z_0(out.x[0], out.x[1], Z_0, loss_res, nabla_con, nabla_pen)
+        loss_res = loss_gen(loss_func, S, Z_0) - C
         out_obj.append(penalty_objective(Z_0, Z_0[:-1], Z_0[1:], psi, theta))
         if not iteration_ % 100:
             print(iteration_)
             print(np.max(loss_res), np.mean(loss_res))
             print(out_obj[-1])
-        
-        checks.append(check)
-
-        if stop_at is not None:
-            if abs(check.obj - stop_at) / abs(stop_at) < stop_when:
-                break
-
-        if check.rnorm <= check.e_pri and check.snorm <= check.e_dual:
-            break
-
-        if weights[0] is None:
-            if len(con_obj_mean) > m:
-                if np.mean(con_obj_mean[-m:-int(m/2)]) < np.mean(con_obj_mean[-int(m/2):]) and np.max(loss_res) > eps:
-                # or np.mean(con_obj_max[-100:-50]) < np.mean(con_obj_max[-50:])) # np.mean(loss_res) > 0.25:
-                    print("Rho Mult", mult * rho[0], iteration_, np.mean(loss_res), con_obj_max[-1])
-                    # loss_diff /= 5            
-                    # C_ = C - loss_diff           
-                    # resscale scaled dual variables
-                    rho = mult * rho
-                    U_1 /= mult
-                    U_2 /= mult
-                    con_obj_mean = []
-                    con_obj_max = []
-        else:
-            for t in col:
-                rho *= weights[t]
-                U_1 /= weights[t][:-1, None, None]
-                U_2 /= weights[t][1:, None, None]
-                con_obj[t] = []
-                print('Mult', iteration_, t, rho[t])      
-        
+        # print(out_obj[-1], np.max(loss_res), np.mean(loss_res))
     else:
         warnings.warn("Objective did not converge.")
 
     print(iteration_, out_obj[-1])
-    print(check.rnorm, check.e_pri)
-    print(check.snorm, check.e_dual)
+    # print(check.rnorm, check.e_pri)
+    # print(check.snorm, check.e_dual)
 
     covariance_ = np.array([linalg.pinvh(x) for x in Z_0])
     return_list = [Z_0, covariance_]
