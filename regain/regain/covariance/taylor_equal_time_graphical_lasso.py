@@ -225,7 +225,7 @@ def taylor_equal_time_graphical_lasso(
     #     return soft_thresholding_od(A_t, lamda=theta / (rho_t * divisor_t + x * nabla_t_2))            
 
     def _Z_0(x, A_t, g_t, nabla_t, rho_t, divisor_t):
-        _A_t = A_t + x * g_t * nabla_t
+        _A_t = A_t - x * g_t * nabla_t
         A_t = 0.5 * (_A_t + _A_t.transpose(1, 0))
         # return soft_thresholding_od(A_t / (rho_t * divisor_t), lamda=theta / (rho_t * divisor_t))            
         return soft_thresholding_od(A_t, lamda=theta / (rho_t * divisor_t))            
@@ -254,40 +254,24 @@ def taylor_equal_time_graphical_lasso(
         A /= divisor[:, None, None]
         
         if loss_func.__name__ == 'neg_logl':
-            # nabla = np.array([S_t - np.linalg.inv(Z_0_old_t).ravel() for (S_t, Z_0_old_t) in zip(S_flat, Z_0_old)])
             nabla = np.array([S_t - np.linalg.inv(Z_0_old_t) for (S_t, Z_0_old_t) in zip(S, Z_0_old)])
-            max_eigen_nabla  = np.array([np.linalg.norm(nabla_t, 2) for nabla_t in nabla])
         elif loss_func.__name__ == 'dtrace': 
-            nabla = np.array([(2 * Z_0_old_t.ravel() @ S_t - I_flat) for (S_t, Z_0_old_t) in zip(S_flat, Z_0_old)])
+            nabla = np.array([(2 * Z_0_old_t @ S_t - I) for (S_t, Z_0_old_t) in zip(S, Z_0_old)])
         nabla_T_Z_0_old = np.array([nabla_t.ravel() @ Z_0_old_t.ravel() for (nabla_t, Z_0_old_t) in zip(nabla, Z_0_old)])
-        # g = nabla_T_Z_0_old - loss_res_old - u
+        max_eigen_nabla  = np.array([nabla_t.ravel() @ nabla_t.ravel() for nabla_t in nabla])
         g = (loss_res_old - u) / (rho * divisor)
-        # nabla_T_nabla =  np.einsum('ij,ij->i', nabla, nabla)
-        # sum_nabla_2 = np.einsum('ij->i', nabla) ** 2
-        # nabla_2 = np.array([(nabla_t * nabla_t).reshape(S.shape[1], S.shape[2]) for nabla_t in nabla])
-        # nabla_T_A = np.array([nabla_t @ A_t.ravel() for (nabla_t, A_t) in zip(nabla, A)])
 
             
         if iteration_ == 0:
             g = np.zeros(T)
-            # nabla = np.zeros_like(Z_0_flat)
             nabla = np.zeros_like(Z_0)
             nabla_T_Z_0_old = g.copy()
-            # nabla_T_nabla = g.copy()
-            # nabla_2 = g.copy()
-            # nabla_T_A = g.copy()
+            max_eigen_nabla = np.ones(T)
         
         col = []
 
         for t in range(T):
-            # out = minimize_scalar(
-            #         partial(_f, _Z_0=_Z_0, A_t=A[t].ravel(), g_t=g[t], nabla_t=nabla[t], 
-            #                 nabla_t_T_A_t=nabla_T_A[t], nabla_t_T_nabla_t=nabla_T_nabla[t], 
-            #                 rho_t=rho[t], divisor_t=divisor[t], nabla_t_2=nabla_2[t],
-            #                 loss_func=loss_func, S_t=S[t], c_t=C[t], 
-            #                 loss_res_old_t=loss_res_old[t], nabla_t_T_Z_0_old_t=nabla_T_Z_0_old[t])
-            #         )
-            # Z_0[t] = _Z_0(out.x, A[t].ravel(), g[t], nabla[t], nabla_T_A[t], nabla_T_nabla[t], rho[t], divisor[t], nabla_2[t])
+            gamma_max_t = rho[t] / max_eigen_nabla[t] - 1e-6
             out = minimize_scalar(
                     partial(_f, _Z_0=_Z_0, A_t=A[t], g_t=g[t], nabla_t=nabla[t],
                             rho_t=rho[t], divisor_t=divisor[t],
@@ -295,10 +279,17 @@ def taylor_equal_time_graphical_lasso(
                             loss_res_old_t=loss_res_old[t], 
                             nabla_t_T_Z_0_old_t=nabla_T_Z_0_old[t])
                     )
+            if out.x > gamma_max_t:
+                out = minimize_scalar(
+                    partial(_f, _Z_0=_Z_0, A_t=A[t], g_t=g[t], nabla_t=nabla[t],
+                            rho_t=rho[t], divisor_t=divisor[t],
+                            loss_func=loss_func, S_t=S[t], c_t=C[t], 
+                            loss_res_old_t=loss_res_old[t], 
+                            nabla_t_T_Z_0_old_t=nabla_T_Z_0_old[t]),
+                    bounds=(-1e3, gamma_max_t),
+                    method='bounded'
+                    )
             Z_0[t] = _Z_0(out.x, A[t], g[t], nabla[t], rho[t], divisor[t])
-            if out.x * np.sum(nabla[t] * Z_0[t]) * max_eigen_nabla[t] >= rho[t]:
-                print('Norm Check Failed. Not PSD.')
-                return Z_0_old
             loss_res[t] = loss_func(S[t], Z_0[t]) - C[t]
             u[t] += loss_res_old[t] + np.sum(nabla[t] * Z_0[t]) - nabla_T_Z_0_old[t]
             if weights[0] is not None:
@@ -337,26 +328,13 @@ def taylor_equal_time_graphical_lasso(
                     squared_norm(Z_0[1:] - Z_2)
                 )
 
-        # dual_con_res = loss_res - loss_res_old
-        # # dual_con_res += (
-        # #     nabla_T_Z_0_old - 
-        # #     np.array([np.sum(nabla_t * Z_0_t.flatten()) for (nabla_t, Z_0_t) in zip(nabla, Z_0)])
-        # #     )
-        # dual_con_res += (
-        #     nabla_T_Z_0_old - 
-        #     np.array([np.sum(nabla_t * Z_0_t) for (nabla_t, Z_0_t) in zip(nabla, Z_0)])
-        #     )
-
         loss_res_old = loss_res.copy()
 
         snorm = np.sqrt(
-                    # squared_norm((rho * dual_con_res)[:, None, None] * nabla) + 
                     squared_norm(rho[:-1, None, None] * (Z_1 - Z_1_old)) + 
                     squared_norm(rho[1:, None, None] * (Z_2 - Z_2_old))
                 )
         e_dual = np.sqrt(2 * Z_1.size) * tol + rtol * np.sqrt(
-                    # np.sqrt(loss_res.size + 2 * Z_1.size) * tol + rtol * np.sqrt(
-                    # squared_norm(rho * u) +
                     squared_norm(rho[:-1, None, None] * U_1) + 
                     squared_norm(rho[1:, None, None] * U_2)
                 )     
