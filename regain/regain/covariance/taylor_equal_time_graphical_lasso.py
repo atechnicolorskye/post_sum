@@ -225,7 +225,7 @@ def taylor_equal_time_graphical_lasso(
     #     return soft_thresholding_od(A_t, lamda=theta / (rho_t * divisor_t + x * nabla_t_2))            
 
     def _Z_0(x, A_t, g_t, nabla_t, rho_t, divisor_t):
-        _A_t = A_t - x * g_t * nabla_t
+        _A_t = A_t + x * g_t * nabla_t
         A_t = 0.5 * (_A_t + _A_t.transpose(1, 0))
         # return soft_thresholding_od(A_t / (rho_t * divisor_t), lamda=theta / (rho_t * divisor_t))            
         return soft_thresholding_od(A_t, lamda=theta / (rho_t * divisor_t))            
@@ -259,9 +259,8 @@ def taylor_equal_time_graphical_lasso(
             nabla = np.array([(2 * Z_0_old_t @ S_t - I) for (S_t, Z_0_old_t) in zip(S, Z_0_old)])
         nabla_T_Z_0_old = np.array([nabla_t.ravel() @ Z_0_old_t.ravel() for (nabla_t, Z_0_old_t) in zip(nabla, Z_0_old)])
         max_eigen_nabla  = np.array([nabla_t.ravel() @ nabla_t.ravel() for nabla_t in nabla])
-        g = (loss_res_old - u) / (rho * divisor)
+        g = -(loss_res_old + u) / (rho * divisor)
 
-            
         if iteration_ == 0:
             g = np.zeros(T)
             nabla = np.zeros_like(Z_0)
