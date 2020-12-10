@@ -196,12 +196,12 @@ def gradient_equal_time_graphical_lasso(
 
     rho = rho * np.ones(T)    
     if weights[0] is not None:
-        if weights == 'rbf':
-            weights = rbf_weights(T, weights, mult)
-        elif weights == 'exp':
-            weights = exp_weights(T, weights, mult)
-        elif weights == 'lin:':
-            weights = lin_weights(T, weights, mult)
+        if weights[0] == 'rbf':
+            weights = rbf_weights(T, weights[1], mult)
+        elif weights[0] == 'exp':
+            weights = exp_weights(T, weights[1], mult)
+        elif weights[0] == 'lin':
+            weights = lin_weights(T, weights[1], mult)
         con_obj = {}
         for t in range(T):
             con_obj[t] = []

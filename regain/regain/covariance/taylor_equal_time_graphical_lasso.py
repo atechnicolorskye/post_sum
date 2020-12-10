@@ -190,7 +190,7 @@ def taylor_equal_time_graphical_lasso(
             weights = rbf_weights(T, weights[1], mult)
         elif weights[0] == 'exp':
             weights = exp_weights(T, weights[1], mult)
-        elif weights[0] == 'lin:':
+        elif weights[0] == 'lin':
             weights = lin_weights(T, weights[1], mult)
         con_obj = {}
         for t in range(T):
@@ -215,28 +215,12 @@ def taylor_equal_time_graphical_lasso(
     ]
 
     # # thresholded Z_0_t
-    # def _Z_0(x, A_t, g_t, nabla_t, nabla_t_T_A_t, nabla_t_T_nabla_t, rho_t, divisor_t, nabla_t_2):
-    #     _A_t = (A_t + x * g_t * nabla_t - 
-    #                 (x * nabla_t_T_A_t + x ** 2 * g_t * nabla_t_T_nabla_t) * nabla_t  / 
-    #                 (divisor_t * rho_t + x * nabla_t_T_nabla_t)
-    #             ).reshape(S.shape[1], S.shape[2])
-    #     _A_t /= (rho_t * divisor_t)
-    #     A_t = 0.5 * (_A_t + _A_t.transpose(1, 0))
-    #     return soft_thresholding_od(A_t, lamda=theta / (rho_t * divisor_t + x * nabla_t_2))            
-
     def _Z_0(x, A_t, g_t, nabla_t, rho_t, divisor_t):
         _A_t = A_t + x * g_t * nabla_t
         A_t = 0.5 * (_A_t + _A_t.transpose(1, 0))
-        # return soft_thresholding_od(A_t / (rho_t * divisor_t), lamda=theta / (rho_t * divisor_t))            
         return soft_thresholding_od(A_t, lamda=theta / (rho_t * divisor_t))            
 
     # # constrained optimisation via line search
-    # def _f(x, _Z_0, A_t, g_t, nabla_t, nabla_t_T_A_t, nabla_t_T_nabla_t, rho_t, divisor_t, 
-    #         nabla_t_2, loss_func, S_t, c_t, loss_res_old_t, nabla_T_Z_0_old_t):
-    #     _Z_0_t = _Z_0(x, A_t, g_t, nabla_t, nabla_t_T_A_t, nabla_t_T_nabla_t, rho_t, divisor_t, nabla_t_2)
-    #     loss_res_t = loss_func(S_t, _Z_0_t) - c_t
-    #     return loss_res_t ** 2 + (loss_res_t - loss_res_old_t - nabla_t @ _Z_0_t.ravel() + nabla_T_Z_0_old_t) ** 2
-
     def _f(x, _Z_0, A_t, g_t, nabla_t, rho_t, divisor_t, loss_func, S_t, c_t, loss_res_old_t, nabla_t_T_Z_0_old_t):
         _Z_0_t = _Z_0(x, A_t, g_t, nabla_t, rho_t, divisor_t)
         loss_res_t = loss_func(S_t, _Z_0_t) - c_t
@@ -245,7 +229,6 @@ def taylor_equal_time_graphical_lasso(
 
     for iteration_ in range(max_iter):
         # update Z_0        
-        # A = np.zeros_like(Z_0)
         A = Z_0_old
         A[:-1] += Z_1 - U_1
         A[1:] += Z_2 - U_2
@@ -290,7 +273,7 @@ def taylor_equal_time_graphical_lasso(
                     )
             Z_0[t] = _Z_0(out.x, A[t], g[t], nabla[t], rho[t], divisor[t])
             loss_res[t] = loss_func(S[t], Z_0[t]) - C[t]
-            u[t] += loss_res_old[t] + np.sum(nabla[t] * Z_0[t]) - nabla_T_Z_0_old[t]
+            u[t] += loss_res_old[t] # + np.sum(nabla[t] * Z_0[t]) - nabla_T_Z_0_old[t]
             if weights[0] is not None:
                 con_obj[t].append(loss_res[t] ** 2)    
                 if len(con_obj[t]) > m and np.mean(con_obj[t][-m:-int(m/2)]) < np.mean(con_obj[t][-int(m/2):]) and loss_res[t] > eps:
@@ -377,8 +360,7 @@ def taylor_equal_time_graphical_lasso(
             break
 
         if weights[0] is None:
-            if len(con_obj_mean) > m:
-                if np.mean(con_obj_mean[-m:-int(m/2)]) < np.mean(con_obj_mean[-int(m/2):]) and np.max(loss_res) > eps:
+            if len(con_obj_mean) > m and np.mean(con_obj_mean[-m:-int(m/2)]) < np.mean(con_obj_mean[-int(m/2):]) and np.max(loss_res) > eps:
                 # or np.mean(con_obj_max[-100:-50]) < np.mean(con_obj_max[-50:])) # np.mean(loss_res) > 0.25:
                     print("Rho Mult", mult * rho[0], iteration_, np.mean(loss_res), con_obj_max[-1])
                     # loss_diff /= 5            

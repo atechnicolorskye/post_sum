@@ -1,6 +1,3 @@
-#!/usr/bin/env python
-# coding: utf-8
-
 import numpy as np
 import pandas as pd
 from numpy.random import multivariate_normal as mvnorm
@@ -56,7 +53,7 @@ print('Vanilla Running Time :{}'.format(toc - tic))
 
 pre_cvx = np.load("mosek_sol_ff5_30_nonsmooth_standard_alpha_0.2_laplacian.npy")
 
-for _weights in [[None], ['lin', 2e2], ['exp', 2e2], ['rbf', 2e2]]:
+for _weights in [['lin', 2e2], ['exp', 2e2], ['rbf', 2e2]]:
     # Set parameters
     max_iter = 10000
     loss = 'LL'
@@ -69,12 +66,9 @@ for _weights in [[None], ['lin', 2e2], ['exp', 2e2], ['rbf', 2e2]]:
     eps = 2
     psi = 'laplacian'
 
-    if _weights[0] == 'rbf':
-        rho = 3e2
-
     from regain.covariance import TaylorTimeGraphicalLasso
     tic = time.perf_counter()    
-    tgl_tp = TaylorTimeGraphicalLasso(max_iter=max_iter, loss=loss, c_level=c_level, theta=theta, rho=rho, mult=mult, weights=weights, m=m, eps=eps, psi=psi)
+    tgl_tp = TaylorTimeGraphicalLasso(max_iter=max_iter, loss=loss, c_level=c_level, theta=theta, rho=rho, mult=mult, weights=weights, m=20, eps=eps, psi=psi)
     emp_inv_score_tp, baseline_score_tp, fit_score_tp, pre_tp = tgl_tp.fit_cov(X_cov).eval_cov_pre() 
     toc = time.perf_counter()
     print('Full Running Time :{}'.format(toc - tic))
@@ -122,7 +116,7 @@ for _weights in [[None], ['lin', 2e2], ['exp', 2e2], ['rbf', 2e2]]:
     pre_tpe_thres = {}
     fit_score_tpe_thres = {}
     for i in [1e-4]:
-        pre_tpe_thres[i] = np.array([k * (np.abs(k) >= i) for k in pre_tp])
+        pre_tpe_thres[i] = np.array([k * (np.abs(k) >= i) for k in pre_tpe])
         tgl_tpe.precision_ = pre_tpe_thres[i]
         emp_inv_score, baseline_score, fit_score_tpe_thres[i], _ = tgl_tpe.eval_cov_pre() 
         print('Linear Objective', penalty_objective(pre_tpe_thres[i], pre_tpe_thres[i][:-1], pre_tpe_thres[i][1:], psi, tgl_tpe.theta))
@@ -140,7 +134,6 @@ for _weights in [[None], ['lin', 2e2], ['exp', 2e2], ['rbf', 2e2]]:
     print('Full Max', np.max(np.array(fit_score_tp_thres[1e-4]) - baseline_score_g))
     print('Linear Max', np.max(np.array(fit_score_tpe_thres[1e-4]) - baseline_score_g))
     print('Gradient Max', np.max(np.array(fit_score_g_thres[1e-4]) - baseline_score_g))
-
 
     fig, ax = plt.subplots(figsize=(20, 10))
     fig.patch.set_facecolor('white')
@@ -203,15 +196,15 @@ for _weights in [[None], ['lin', 2e2], ['exp', 2e2], ['rbf', 2e2]]:
     mean_diff = np.mean(diff)
     ax.plot(range(1, X_cov.shape[-1]), diff, color='r', alpha=0.5, 
             label=r'Constrained MOSEK, Thres = {}, Mean Diff = {:.3f}'.format(1e-4, mean_diff))
-    diff_grad = [norm(pre_g_thres[1e-4][t] - pre_g_thres[1e-4][t-1], 'fro') for t in range(1, X_cov.shape[-1])]
-    ax.plot(range(1, X_cov.shape[-1]), diff_grad, color='g', alpha=0.5,
-            label=r'Constraint ADMM Gradient, Mean Diff = {:.3f}'.format(np.mean(diff_grad)))
     diff_grad = [norm(pre_tp_thres[1e-4][t] - pre_tp_thres[1e-4][t-1], 'fro') for t in range(1, X_cov.shape[-1])]
     ax.plot(range(1, X_cov.shape[-1]), diff_grad, color='m', alpha=0.5,
             label=r'Constraint ADMM Full, Mean Diff = {:.3f}'.format(np.mean(diff_grad)))
     diff_grad = [norm(pre_tpe_thres[1e-4][t] - pre_tpe_thres[1e-4][t-1], 'fro') for t in range(1, X_cov.shape[-1])]
     ax.plot(range(1, X_cov.shape[-1]), diff_grad, color='b', alpha=0.5,
             label=r'Constraint ADMM Linear, Mean Diff = {:.3f}'.format(np.mean(diff_grad)))
+    diff_grad = [norm(pre_g_thres[1e-4][t] - pre_g_thres[1e-4][t-1], 'fro') for t in range(1, X_cov.shape[-1])]
+    ax.plot(range(1, X_cov.shape[-1]), diff_grad, color='g', alpha=0.5,
+            label=r'Constraint ADMM Gradient, Mean Diff = {:.3f}'.format(np.mean(diff_grad)))
 
     fig.legend(fontsize=15, loc='upper right', bbox_to_anchor=(0.495, 0.45, 0.5, 0.5))
     ax.set_ylabel('Difference in Frobenius Norm', fontsize=15)
@@ -220,6 +213,3 @@ for _weights in [[None], ['lin', 2e2], ['exp', 2e2], ['rbf', 2e2]]:
     ax.set_title(r'Difference in Frobenius Norm for Constrained MOSEK/ADMM', fontsize=20)
     plt.tight_layout()
     plt.savefig('ff5_ip30_10000_' + str(weights[0]) + '_diff_fro.pdf')
-
-
-

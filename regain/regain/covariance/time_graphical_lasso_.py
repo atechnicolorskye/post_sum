@@ -84,8 +84,14 @@ def objective(n_samples, S, K, Z_0, Z_1, Z_2, alpha, beta, psi):
     return obj
 
 
+def penalty_objective(Z_0, Z_1, Z_2, psi, theta):
+    """Penalty-only objective function for time-varying graphical LASSO."""
+    return theta * sum(map(l1_od_norm, Z_0)) + (1 - theta) * sum(map(psi, Z_2 - Z_1))
+
+
 def time_graphical_lasso(
-        emp_cov, alpha=0.01, rho=1, beta=1, max_iter=100, n_samples=None,
+        emp_cov, alpha=0.01, rho=1, beta=1, theta=0.5, 
+        max_iter=100, n_samples=None,
         verbose=False, psi='laplacian', tol=1e-4, rtol=1e-4,
         return_history=False, return_n_iter=True, mode='admm',
         compute_objective=True, stop_at=None, stop_when=1e-4,
@@ -264,6 +270,8 @@ def time_graphical_lasso(
     else:
         warnings.warn("Objective did not converge.")
 
+    print(iteration_, penalty_objective(Z_0, Z_0[:-1], Z_0[1:], psi, theta))
+
     covariance_ = np.array([linalg.pinvh(x) for x in Z_0])
     return_list = [Z_0, covariance_]
     if return_history:
@@ -343,7 +351,7 @@ class TimeGraphicalLasso(GraphicalLasso):
 
     """
     def __init__(
-            self, alpha=0.01, beta=1., mode='admm', rho=1., tol=1e-4,
+            self, alpha=0.01, beta=1., theta=0.5, mode='admm', rho=1., tol=1e-4,
             rtol=1e-4, psi='laplacian', max_iter=100, verbose=False, assume_centered=False, 
             return_history=False, update_rho_options=None, compute_objective=True, 
             stop_at=None, stop_when=1e-4, suppress_warn_list=False, init='empirical'):
@@ -353,6 +361,7 @@ class TimeGraphicalLasso(GraphicalLasso):
             update_rho_options=update_rho_options,
             compute_objective=compute_objective, init=init)
         self.beta = beta
+        self.theta = theta
         self.psi = psi
         self.return_history = return_history
         self.stop_at = stop_at
@@ -381,7 +390,7 @@ class TimeGraphicalLasso(GraphicalLasso):
         """
 
         out = time_graphical_lasso(
-            emp_cov, alpha=self.alpha, rho=self.rho, beta=self.beta,
+            emp_cov, alpha=self.alpha, rho=self.rho, beta=self.beta, theta=self.theta,
             mode=self.mode, n_samples=n_samples, tol=self.tol, rtol=self.rtol,
             psi=self.psi, max_iter=self.max_iter, verbose=self.verbose, 
             return_n_iter=True, return_history=self.return_history,
