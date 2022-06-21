@@ -259,9 +259,10 @@ def taylor_equal_time_graphical_lasso(
                             rho_t=rho[t], divisor_t=divisor[t],
                             loss_func=loss_func, S_t=S[t], c_t=C[t], 
                             loss_res_old_t=loss_res_old[t], 
-                            nabla_t_T_Z_0_old_t=nabla_T_Z_0_old[t])
+                            nabla_t_T_Z_0_old_t=nabla_T_Z_0_old[t]),
                     )
-            if out.x > gamma_max_t:
+            # To ensure actually smaller than gamma_max_t
+            if out.x > gamma_max_t: 
                 out = minimize_scalar(
                     partial(_f, _Z_0=_Z_0, A_t=A[t], g_t=g[t], nabla_t=nabla[t],
                             rho_t=rho[t], divisor_t=divisor[t],
@@ -352,6 +353,10 @@ def taylor_equal_time_graphical_lasso(
             print(out_obj[-1])
         checks.append(check)
 
+        if np.isnan(out_obj[-1]):
+            print('Failed')
+            break
+
         if stop_at is not None:
             if abs(check.obj - stop_at) / abs(stop_at) < stop_when:
                 break
@@ -390,7 +395,7 @@ def taylor_equal_time_graphical_lasso(
     print(check.snorm, check.e_dual)
 
     covariance_ = np.array([linalg.pinvh(x) for x in Z_0])
-    return_list = [Z_0, covariance_]
+    return_list = [Z_0, covariance_, out_obj]
     if return_history:
         return_list.append(checks)
     if return_n_iter:
@@ -527,7 +532,7 @@ class TaylorEqualTimeGraphicalLasso(GraphicalLasso):
         if self.return_history:
             self.precision_, self.covariance_, self.history_, self.n_iter_ = out
         else:
-            self.precision_, self.covariance_, self.n_iter_ = out
+            self.precision_, self.covariance_, self.obj, self.n_iter_ = out
         return self
 
 

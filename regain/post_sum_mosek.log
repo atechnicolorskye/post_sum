@@ -1,8 +1,0 @@
-==========================================
-SLURM_JOB_ID = 2336710
-SLURM_SUBMIT_DIR = /home/sikai/post_sum/regain
-SLURM_JOB_NODELIST = mcn30
-==========================================
-Job ID: 2336710
-Job User: sikai
-Num Cores: 4

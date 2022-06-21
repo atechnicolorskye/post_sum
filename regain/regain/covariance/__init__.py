@@ -36,6 +36,7 @@ from .taylor_equal_time_graphical_lasso import TaylorEqualTimeGraphicalLasso
 from .taylor_equal_time_graphical_lasso_v2 import TaylorEqualTimeGraphicalLassoV2
 from .taylor_time_graphical_lasso import TaylorTimeGraphicalLasso
 from .gradient_equal_time_graphical_lasso import GradientEqualTimeGraphicalLasso
+# from .chol_gradient_equal_time_graphical_lasso import CholeskyGradientEqualTimeGraphicalLasso
 # from .gradient_equal_fb import GradientEqualTimeGraphicalLasso
 
 from .cvx_tvgl import CVXInequalityTimeGraphicalLasso
